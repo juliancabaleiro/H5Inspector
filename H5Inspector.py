@@ -131,9 +131,9 @@ class H5Inspector(QMainWindow):
         """
         Load the selected HDF5 file into all application tabs.
 
-        - Validates the file path and propagates the file path to View,
-        Edit, and Analysis tabs. 
-        - Handles errors during loading.
+        Validates the file path and propagates the file path to View,
+        Edit, and Analysis tabs for processing. Displays success/error
+        messages in the status bar and popup dialogs.
         """
         filepath = self.path_edit.text().strip()
         

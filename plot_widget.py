@@ -124,6 +124,8 @@ class CursorBridge(QObject):
     def on_ready(self):
         """
         Signal that the plot has finished rendering.
+
+        Triggers logs or actions once Plotly is fully loaded in the browser.
         """
         # logging.debug(f"Plotly render COMPLETE for {self.parent.dataset_name}")
 
@@ -138,6 +140,7 @@ class PlotWidget(QWidget):
     
     # Signals
     cursorsMoved = pyqtSignal(float, float)
+    rangeChanged = pyqtSignal()
     
     def __init__(self, parent=None):
         """
@@ -158,6 +161,7 @@ class PlotWidget(QWidget):
         self.current_y_series = None
         self.active_cursor_mode = 'off' # 'p1', 'p2', 'auto', or 'off'
         self.x_axis_type = 'linear' # 'linear' or 'log'
+        self.plot_style = 'line' # 'line' or 'stem'
         
         # Set up QWebChannel for JS-Python communication
         self.channel = QWebChannel()
@@ -283,6 +287,27 @@ class PlotWidget(QWidget):
         
         layout.addLayout(self.controls_layout)
         
+        # New: Plot Limit Inputs (End %)
+        self.frag_layout = QHBoxLayout()
+        self.frag_layout.addWidget(QLabel("Plot Range: 0% to"))
+        
+        from PyQt5.QtWidgets import QLineEdit
+        
+        # End Input
+        self.end_input = QLineEdit("50")
+        self.end_input.setFixedWidth(60)
+        self.end_input.setStyleSheet("font-size: 10pt; font-weight: bold;")
+        self.end_input.setPlaceholderText("100")
+        self.end_input.editingFinished.connect(self.update_plot)
+        self.end_input.textChanged.connect(self.validate_range_ui) # Immediate feedback
+        self.frag_layout.addWidget(self.end_input)
+        
+        self.frag_layout.addWidget(QLabel("%"))
+        self.frag_layout.addStretch()
+        
+        layout.addLayout(self.frag_layout)
+
+
         # Plotly web view
         self.plot_view = QWebEngineView()
         self.plot_view.setMinimumHeight(400)
@@ -311,8 +336,28 @@ class PlotWidget(QWidget):
         stats_group.setLayout(stats_layout)
         self.stats_group = stats_group
         layout.addWidget(self.stats_group, stretch=1)
+
+    def validate_range_ui(self):
+        """
+        Provide immediate visual feedback for range inputs.
+
+        Checks the validity of the percentage input in the UI and applies
+        error styles (red background) if the values are out of bounds.
+        """
+        try:
+            e_txt = self.end_input.text().strip().replace(',', '.').replace('%', '')
+            e = float(e_txt) if e_txt else 100.0
+            
+            error_style = "font-size: 10pt; font-weight: bold; background-color: #fab1a0; border: 2px solid #e17055;"
+            normal_style = "font-size: 10pt; font-weight: bold; background-color: white; border: 1px solid #DCDDE1;"
+            
+            e_valid = 0 < e <= 100
+            
+            self.end_input.setStyleSheet(normal_style if e_valid else error_style)
+        except ValueError:
+            pass
     
-    def set_data(self, data: np.ndarray, columns: list, dataset_name: str = "", x_axis_type: str = 'linear'):
+    def set_data(self, data: np.ndarray, columns: list, dataset_name: str = "", x_axis_type: str = 'linear', plot_style: str = 'line'):
         """
         Set data for plotting.
         
@@ -326,6 +371,8 @@ class PlotWidget(QWidget):
             Name of the dataset, by default "".
         x_axis_type : str, optional
             Type of X axis ('linear' or 'log'), by default 'linear'.
+        plot_style : str, optional
+            Style of plot ('line' or 'stem'), by default 'line'.
         """
         if data is None:
             # logging.debug(f"set_data called with None for {dataset_name}")
@@ -338,6 +385,7 @@ class PlotWidget(QWidget):
         self.data = data
         self.dataset_name = dataset_name
         self.x_axis_type = x_axis_type
+        self.plot_style = plot_style
         
         # Block signals to avoid multiple update_plot calls during setup
         self.x_axis_combo.blockSignals(True)
@@ -412,6 +460,12 @@ class PlotWidget(QWidget):
             
         self.export_btn.setEnabled(len(self.columns) > 0)
         try:
+            # Auto-calculate display limits based on data size (Performance)
+            if self.data is not None:
+                # Assuming simple 1D or 2D structure length
+                point_count = len(self.data)
+                self.auto_calc_limit(point_count)
+            
             # logging.debug(f"Triggering update_plot for {dataset_name}")
             self.update_plot()
         except Exception as e:
@@ -543,8 +597,38 @@ class PlotWidget(QWidget):
             
         return np.array([0.0])
     
+    def auto_calc_limit(self, total_points: int):
+        """
+        Auto-calculate start/end % to keep points within a safe limit.
+
+        Adjusts the 'end_input' percentage to ensure the plotted data stays 
+        below a predefined threshold for performance reasons.
+
+        Parameters
+        ----------
+        total_points : int
+            Total number of data points in the series.
+        """
+        # No auto-limit for FFT/Stem style
+        if self.plot_style == 'stem':
+            return
+
+        SAFE_LIMIT = 10000
+        if total_points <= SAFE_LIMIT:
+            self.end_input.setText("50")
+        else:
+            pct_needed = (SAFE_LIMIT / total_points) * 100.0
+            final_pct = min(50.0, pct_needed)
+            self.end_input.setText(f"{final_pct:.2f}")
+
     def update_plot(self):
-        """Redraw the plot with current axis and data."""
+        """
+        Redraw the plot with current axis and data.
+
+        Gathers the current column selections, slices the data according to the
+        range settings, applies log/linear scaling, and generates the Plotly
+        HTML for display in the QWebEngineView.
+        """
         # Prepare data for plotting
         x_col = self.x_axis_combo.currentText()
         y_col = self.y_axis_combo.currentText()
@@ -591,38 +675,75 @@ class PlotWidget(QWidget):
             self.cursor1_pos = 0.0
             self.cursor2_pos = 1.0
         
-        # Downsample if too large (Simple Decimation - "normal but with fewer points")
-        max_pts_limit = 20000 
-        if len(x_data) > max_pts_limit:
-            indices = np.linspace(0, len(x_data)-1, max_pts_limit, dtype=int)
-            x_plot = x_data[indices]
-            y_plot = y_data[indices]
+        # FRAGMENT VIEW (End % only, start always 0%)
+        start_pct = 0.0
+        
+        # Helper to parse and styling
+        def parse_input(line_edit, default_val):
+            # Strip whitespace and common units/symbols
+            txt = line_edit.text().strip().replace(',', '.').replace('%', '').replace(' ', '')
+            try:
+                if not txt: return default_val
+                val = float(txt)
+                return val
+            except ValueError:
+                logging.error(f"Failed to parse input '{txt}' for percentage, using default {default_val}")
+                return default_val
+
+        end_pct = parse_input(self.end_input, 50.0)
             
-            title = f"{self.dataset_name} (Decimated {len(x_data)}->{len(x_plot)})"
-            # logging.debug(f"update_plot - Simple Decimation: {len(x_data)} to {len(x_plot)} pts")
+        # Clamp and ensure validity
+        end_pct = max(0.1, min(100.0, end_pct))
+            
+        # Calculate indices based on percentage of TOTAL points
+        total_len = len(x_data)
+        
+        # Round to nearest integer index with safety margin
+        idx_start = 0
+        idx_end = int(max(1, min(total_len, total_len * (end_pct / 100.0))))
+        
+        # Final UI Feedback for invalid ranges before plotting
+        error_style = "font-size: 10pt; font-weight: bold; background-color: #fab1a0; border: 2px solid #e17055;"
+        normal_style = "font-size: 10pt; font-weight: bold; background-color: white; border: 1px solid #DCDDE1;"
+        
+        if end_pct <= 0 or end_pct > 100:
+            self.end_input.setStyleSheet(error_style)
         else:
-            x_plot = x_data
-            y_plot = y_data
-            title = self.dataset_name or f"{y_col} vs {x_col}"
+            self.end_input.setStyleSheet(normal_style)
+
+        # SLICE THE DATA FRESH (No Truncation)
+        x_plot = x_data[idx_start:idx_end]
+        y_plot = y_data[idx_start:idx_end]
+
+        # Emit that range has changed
+        self.rangeChanged.emit()
+        
+        title = self.dataset_name or f"{y_col} vs {x_col}"
+        if start_pct > 0 or end_pct < 100:
+            title += f" (Range: {start_pct:.2f}% - {end_pct:.2f}%)"
             
-        # Convert to standard numeric format and handle JSON-safe NaNs (None)
-        try:
-            # OPTIMIZATION: Only use list comprehension if actually needed
-            # and avoid redundant astype(float) if already float
-            if not np.all(np.isfinite(x_plot)):
-                x_p_list = [x if np.isfinite(x) else None for x in x_plot]
-            else:
-                x_p_list = x_plot.tolist()
-                
-            if not np.all(np.isfinite(y_plot)):
-                y_p_list = [y if np.isfinite(y) else None for y in y_plot]
-            else:
-                y_p_list = y_plot.tolist()
-        except Exception as e:
-            logging.error(f"Numeric conversion failed: {e}")
-            self.plot_view.setHtml(f"<h3 style='color:red;'>Data conversion error: {e}</h3>")
+        # Filter valid data for Log X if needed (Global filter)
+        if self.x_axis_type == 'log':
+             valid_mask = (x_plot > 0) & np.isfinite(x_plot)
+             if np.any(valid_mask):
+                 x_p_list = x_plot[valid_mask].tolist()
+                 y_p_list = y_plot[valid_mask].tolist()
+                 # Re-assign x_plot as well for range calculations later
+                 x_plot = x_plot[valid_mask]
+                 y_plot = y_plot[valid_mask]
+             else:
+                 # Fallback if everything is <= 0
+                 x_p_list, y_p_list = [], []
+        else:
+             # Fast numeric conversion for linear
+             x_p_list = x_plot.tolist()
+             y_p_list = y_plot.tolist()
+
+        num_points = len(x_p_list)
+        if num_points == 0:
+            self.plot_view.setHtml("<div style='display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif;'><h3>No valid data points to plot</h3></div>")
             return
- 
+
         # Create the plot configuration
         config = {
             'responsive': True, 
@@ -632,17 +753,100 @@ class PlotWidget(QWidget):
             'modeBarButtonsToRemove': ['lasso2d']
         }
         
-        # We generate a JSON-safe version of the data and layout
-        data_traces = [{
-            'x': x_p_list,
-            'y': y_p_list,
-            'type': 'scattergl',
-            'mode': 'lines+markers',
-            'line': {'color': '#2E86DE', 'width': 1.5},
-            'marker': {'size': 4, 'symbol': 'circle', 'color': '#2E86DE'},
-            'name': 'Data',
-            'hovertemplate': f'<b>{x_col}</b>: %{{x}}<br><b>{y_col}</b>: %{{y}}<extra></extra>'
-        }]
+        # Build traces based on style
+        data_traces = []
+        
+        if self.plot_style == 'stem':
+            # Adaptive Strategy:
+            # If few points, show pretty Stems (Lines + Markers).
+            POINT_THRESHOLD_STEM = 5000 
+            
+            num_points = len(x_p_list)
+
+            if num_points <= POINT_THRESHOLD_STEM:
+                # LOW DENSITY: Draw actual Stems using SVG (scatter)
+                try:
+                    full_min = np.nanmin(self.current_y_series) if self.current_y_series is not None else 0
+                    if np.isnan(full_min): full_min = 0
+                    base_y = full_min if full_min < 0 else 0
+                except: base_y = 0
+                
+                stem_x = []
+                stem_y = []
+                for x, y in zip(x_p_list, y_p_list):
+                    if x is not None and y is not None:
+                        stem_x.extend([x, x, None])
+                        stem_y.extend([base_y, y, None])
+                
+                data_traces.append({
+                    'x': stem_x,
+                    'y': stem_y,
+                    'type': 'scatter', 
+                    'mode': 'lines',
+                    'line': {'color': '#2E86DE', 'width': 1.5},
+                    'hoverinfo': 'skip',
+                    'name': 'Stems'
+                })
+                
+                data_traces.append({
+                    'x': x_p_list,
+                    'y': y_p_list,
+                    'type': 'scatter',
+                    'mode': 'markers',
+                    'marker': {'size': 6, 'symbol': 'circle', 'color': '#2E86DE'},
+                    'name': 'Data',
+                    'hovertemplate': f'<b>{x_col}</b>: %{{x}}<br><b>{y_col}</b>: %{{y}}<extra></extra>'
+                })
+            
+            else:
+                # HIGH DENSITY: STILL USE STEMS, but move to ScatterGL for performance.
+                try:
+                    full_min = np.nanmin(self.current_y_series) if self.current_y_series is not None else 0
+                    if np.isnan(full_min): full_min = 0
+                    base_y = full_min if full_min < 0 else 0
+                except: base_y = 0
+                
+                stem_x = []
+                stem_y = []
+                # Construct stem geometry
+                for x, y in zip(x_p_list, y_p_list):
+                    if x is not None and y is not None:
+                        stem_x.extend([x, x, None])
+                        stem_y.extend([base_y, y, None])
+
+                data_traces.append({
+                    'x': stem_x,
+                    'y': stem_y,
+                    'type': 'scattergl', # WebGL for Stems
+                    'mode': 'lines',     
+                    'line': {'color': '#2E86DE', 'width': 1}, # Thinner lines for density
+                    'name': 'Stems',
+                    'hoverinfo': 'skip'
+                })
+                
+                data_traces.append({
+                    'x': x_p_list,
+                    'y': y_p_list,
+                    'type': 'scattergl', # WebGL for Markers
+                    'mode': 'markers',     
+                    'marker': {'size': 5, 'symbol': 'circle', 'color': '#2E86DE'},
+                    'name': 'Data',
+                    'hovertemplate': f'<b>{x_col}</b>: %{{x}}<br><b>{y_col}</b>: %{{y}}<extra></extra>'
+                })
+            
+        else:
+            # Standard Line + Markers (View Tab Style)
+            # Use scattergl for performance
+            data_traces.append({
+                'x': x_p_list,
+                'y': y_p_list,
+                'type': 'scattergl',
+                'mode': 'lines+markers' if len(x_p_list) < 5000 else 'lines',
+                'line': {'color': '#2E86DE', 'width': 1.5},
+                'marker': {'size': 4, 'symbol': 'circle', 'color': '#2E86DE'},
+                'name': 'Data',
+                'hovertemplate': f'<b>{x_col}</b>: %{{x}}<br><b>{y_col}</b>: %{{y}}<extra></extra>'
+            })
         
         # Add cursor lines and shaded region as SHAPES
         # Ensure cursor positions are valid for JSON (replace NaN/None with 0 for shapes)
@@ -684,26 +888,38 @@ class PlotWidget(QWidget):
  
         data_json = json.dumps(data_traces)
         
-        # FFT specific layout refinements
         xaxis_config = {
             'title': {'text': x_col}, 
             'gridcolor': '#ECF0F1', 
             'showgrid': True,
-            'type': self.x_axis_type,
             'rangeslider': {'visible': False}
         }
         
-        # Enforce Nyquist range for FFT
-        if "frequency" in x_col.lower() and len(x_data) > 0:
-            f_max = np.nanmax(x_data)
-            if self.x_axis_type == 'log':
-                # Log scale cannot start at 0. Use a small positive value.
-                # Find the first non-zero frequency or use a default.
-                f_min = np.nanmin(x_data[x_data > 0]) if np.any(x_data > 0) else 1e-6
-                xaxis_config['range'] = [np.log10(f_min), np.log10(f_max)]
-            else:
-                xaxis_config['range'] = [0, f_max]
-            # logging.debug(f"FFT Range enforced {xaxis_config['range']} (type={self.x_axis_type})")
+        if self.x_axis_type == 'log':
+            # Log scale requires explicit range in log10 for better stability
+            xaxis_config['type'] = 'log'
+            try:
+                # x_plot is already filtered for > 0 at this point (Global filter)
+                if len(x_plot) > 0:
+                    x_min_val = np.nanmin(x_plot)
+                    x_max_val = np.nanmax(x_plot)
+                    
+                    if x_min_val > 0 and x_max_val > x_min_val:
+                        l_min = np.log10(x_min_val)
+                        l_max = np.log10(x_max_val)
+                        l_span = l_max - l_min
+                        xaxis_config['autorange'] = False
+                        # Set manual range (Plotly Log scale uses log10 units for the 'range' array)
+                        xaxis_config['range'] = [float(l_min - l_span*0.01), float(l_max + l_span*0.01)]
+                    else:
+                         xaxis_config['autorange'] = True
+                else:
+                    xaxis_config['autorange'] = True
+            except:
+                xaxis_config['autorange'] = True
+        else:
+            xaxis_config['type'] = 'linear'
+            xaxis_config['autorange'] = True
  
         layout_json = json.dumps({
             'title': {'text': title, 'font': {'size': 14, 'color': '#2C3E50'}},
@@ -871,6 +1087,10 @@ class PlotWidget(QWidget):
         html = template.replace("DATA_JSON_PLACEHOLDER", data_json)\
                        .replace("LAYOUT_JSON_PLACEHOLDER", layout_json)\
                        .replace("CONFIG_JSON_PLACEHOLDER", json.dumps(config))
+                       
+        # Inject a timestamp comment to force QWebEngine to treat it as new content
+        import time
+        html += f"<!-- force_refresh: {time.time()} -->"
  
         # logging.debug(f"setHtml called. Content size: {len(html)/1024:.1f} KB")
         self.plot_view.setHtml(html)

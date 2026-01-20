@@ -20,8 +20,6 @@
 It provides an intuitive interface for navigating large datasets, visualizing signals with interactive, scientific-grade tools, and performing spectral analysis (FFT).
 
 ---
-![H5Inspector Demo](assets/gui.gif)
----
 
 ## Features
 

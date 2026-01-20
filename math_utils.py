@@ -137,7 +137,8 @@ def calculate_fft(signal: np.ndarray, fs: float = 1.0, window_name: str = "Recta
 def calculate_thd(magnitude: np.ndarray,
                   freqs: np.ndarray,
                   max_harmonic: int = 40,
-                  bins_per_harmonic: int = 1) -> float:
+                  bins_per_harmonic: int = 1,
+                  fundamental_freq: float = None) -> float:
     """
     Calculate Total Harmonic Distortion (THD) in %.
     
@@ -151,6 +152,8 @@ def calculate_thd(magnitude: np.ndarray,
         Maximum harmonic to include in calculation, by default 40.
     bins_per_harmonic : int, optional
         Number of bins to sum around each harmonic to account for leakage, by default 1.
+    fundamental_freq : float, optional
+        Fundamental frequency to use. If None, it is auto-detected as the max peak.
         
     Returns
     -------
@@ -160,7 +163,14 @@ def calculate_thd(magnitude: np.ndarray,
 
     # Evitar DC
     dc_skip = 1
-    fund_idx = np.argmax(magnitude[dc_skip:]) + dc_skip
+    
+    if fundamental_freq is not None:
+        # Find index for provided fundamental
+        fund_idx = np.argmin(np.abs(freqs - fundamental_freq))
+    else:
+        # Auto-detect
+        fund_idx = np.argmax(magnitude[dc_skip:]) + dc_skip
+        
     fund_mag = magnitude[fund_idx]
     f0 = freqs[fund_idx]
 

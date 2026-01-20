@@ -291,6 +291,8 @@ class EditTab(QWidget):
     def clear_selections(self):
         """
         Clear all checkbox selections in the tree.
+
+        Resets the check state of all items and their children to Qt.Unchecked.
         """
         def clear_item(item):
             item.setCheckState(0, Qt.Unchecked)

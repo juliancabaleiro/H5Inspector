@@ -128,8 +128,9 @@ class AnalysisTab(QWidget):
         self.fft_plot.controls_layout.insertWidget(4, self.signal_source_combo)
         self.fft_plot.controls_layout.insertSpacing(5, 20)
 
-        # Connect cursor movements to parameter updates
+        # Connect cursor movements and range changes to parameter updates
         self.fft_plot.cursorsMoved.connect(self.on_cursors_moved)
+        self.fft_plot.rangeChanged.connect(lambda: self.update_fft_parameters())
         plot_container_layout.addWidget(self.fft_plot)
         
         analysis_layout.addWidget(plot_container)
@@ -228,6 +229,9 @@ class AnalysisTab(QWidget):
     def update_fft_plot_view_only(self):
         """
         Update only the Y-axis displayed in the plot without recalculating FFT.
+
+        Synchronizes the PlotWidget's Y-axis selection with the AnalysisTab's
+        unit selector.
         """
         if not self.last_selected_dataset or not self.cached_fft_results:
             return
@@ -255,14 +259,15 @@ class AnalysisTab(QWidget):
         """
         # We only update parameters (Peak, THD) based on the selection
         # No need for full plot reload (update_fft_plot) for performance
-        self.update_fft_parameters()
+        self.update_fft_parameters(c1=x1, c2=x2)
 
     def update_fft_plot(self):
         """
         Calculate and plot the FFT of the selected dataset.
 
         Reads the sampling frequency and other configuration from UI,
-        performs the FFT, and updates the plot.
+        performs the FFT calculation using math_utils, updates the cached results,
+        and triggers a full plot update in the PlotWidget.
         """
         if not self.last_selected_dataset or not self.current_file:
             return
@@ -322,11 +327,18 @@ class AnalysisTab(QWidget):
             # Determine X-axis type (linear or log)
             x_scale = 'log' if self.log_x_check.isChecked() else 'linear'
             
+            # Reset Plot Range to 50% for new FFT calculation
+            if hasattr(self.fft_plot, 'end_input'):
+                self.fft_plot.end_input.blockSignals(True)
+                self.fft_plot.end_input.setText("50")
+                self.fft_plot.end_input.blockSignals(False)
+            
             self.fft_plot.set_data(
                 fft_data, 
                 [x_label, "Magnitude", "Magnitude (dB)", "Phase"], 
                 f"FFT: {self.last_selected_dataset}",
-                x_axis_type=x_scale
+                x_axis_type=x_scale,
+                plot_style='stem'
             )
             
             # Set the requested Y-axis view
@@ -342,12 +354,19 @@ class AnalysisTab(QWidget):
             logging.error(f"Error calculating FFT: {e}")
             self.fft_plot.clear_plot(f"FFT Error: {str(e)}")
 
-    def update_fft_parameters(self):
+    def update_fft_parameters(self, c1=None, c2=None):
         """
-        Update Peak Freq, Mag and THD using cached FFT results and current cursors.
-        
+        Update Peak Frequency, Magnitude and THD labels.
+
         Calculates peak and THD based on the selected frequency range (if cursors
-        are active) or the full spectrum.
+        are active) or the specified visual range, using the cached FFT results.
+
+        Parameters
+        ----------
+        c1 : float, optional
+            Position of cursor 1, by default None (uses current widget value).
+        c2 : float, optional
+            Position of cursor 2, by default None (uses current widget value).
         """
         if not hasattr(self, 'cached_fft_results') or self.cached_fft_results is None:
             return
@@ -355,36 +374,62 @@ class AnalysisTab(QWidget):
         try:
             freqs, magnitude, phase, mag_db, thd = self.cached_fft_results
             
-            # Determine range from cursors
-            x_mode = self.x_axis_mode_combo.currentText()
+            # Use provided cursors or fall back to widget's current state
+            if c1 is None: c1 = self.fft_plot.cursor1_pos
+            if c2 is None: c2 = self.fft_plot.cursor2_pos
             
-            if self.fft_plot.active_cursor_mode != 'off':
-                c1 = self.fft_plot.cursor1_pos
-                c2 = self.fft_plot.cursor2_pos
-                
-                if c1 is not None and c2 is not None:
-                    # Determine X vector for masking
-                    if x_mode == "Index":
-                        x_vec = np.arange(len(magnitude))
-                        f_min, f_max = min(c1, c2), max(c1, c2)
-                    else:
-                        x_vec = freqs
-                        f_min = min(c1, c2) * 1e3 # Convert kHz back to Hz
-                        f_max = max(c1, c2) * 1e3
-                    
-                    mask = (x_vec >= f_min) & (x_vec <= f_max)
-                    
-                    if np.any(mask):
-                        sel_freqs = freqs[mask]
-                        sel_mag = magnitude[mask]
-                        peak_f, peak_m = math_utils.find_peak(sel_freqs, sel_mag)
-                    else:
-                        peak_f, peak_m = 0, 0
+            # Determine range from cursors or visual view
+            x_mode = self.x_axis_mode_combo.currentText()
+            cursors_active = (self.fft_plot.active_cursor_mode != 'off') and (c1 is not None) and (c2 is not None)
+            
+            use_subrange = cursors_active
+            
+            if cursors_active:
+                # Determine X vector for masking from cursors
+                if x_mode == "Index":
+                    x_vec = np.arange(len(magnitude))
+                    f_min, f_max = min(c1, c2), max(c1, c2)
                 else:
-                    peak_f, peak_m = math_utils.find_peak(freqs, magnitude)
+                    x_vec = freqs
+                    f_min = min(c1, c2) * 1e3 # Convert kHz back to Hz
+                    f_max = max(c1, c2) * 1e3
+            else:
+                # Fallback to visual range if it's not the full 100%
+                try:
+                    e_pct = float(self.fft_plot.end_input.text().replace('%', '') or 100)
+                    if e_pct < 99.99:
+                        use_subrange = True
+                        if x_mode == "Index":
+                            x_vec = np.arange(len(magnitude))
+                            f_min = 0
+                            f_max = (e_pct / 100.0) * len(magnitude)
+                        else:
+                            x_vec = freqs
+                            f_min = 0
+                            f_max = (e_pct / 100.0) * freqs[-1]
+                    else:
+                        use_subrange = False
+                except:
+                    use_subrange = False
+
+            if use_subrange:
+                mask = (x_vec >= f_min) & (x_vec <= f_max)
+                
+                if np.any(mask):
+                    sel_freqs = freqs[mask]
+                    sel_mag = magnitude[mask]
+                    peak_f, peak_m = math_utils.find_peak(sel_freqs, sel_mag)
+                    
+                    # Recalculate THD with this peak as fundamental
+                    # Use FULL arrays to ensure harmonics outside the cursor range are included
+                    current_thd = math_utils.calculate_thd(magnitude, freqs, fundamental_freq=peak_f)
+                else:
+                    peak_f, peak_m = 0, 0
+                    current_thd = 0.0
             else:
                 # No cursors - use full spectrum
                 peak_f, peak_m = math_utils.find_peak(freqs, magnitude)
+                current_thd = thd # Default full spectrum THD
 
             # Update labels
             if x_mode == "Index":
@@ -394,9 +439,7 @@ class AnalysisTab(QWidget):
             else:
                 self.peak_freq_val.setText(f"{peak_f/1e3:.4f} kHz")
             self.peak_mag_val.setText(f"{peak_m:.4g}")
-            self.thd_val.setText(f"{thd:.2f} %")
-            
-            # print(f"DEBUG: FFT Params updated: {peak_f/1e6:.4f} MHz, {peak_m:.4g}, THD: {thd:.2f}%")
+            self.thd_val.setText(f"{current_thd:.2f} %")
             
         except Exception as e:
             logging.error(f"Error updating FFT parameters: {e}")
