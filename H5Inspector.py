@@ -13,8 +13,8 @@ from analysis_tab import AnalysisTab
 
 import logging
 
-# Configure logging to show only errors
-logging.basicConfig(level=logging.ERROR, format='%(levelname)s: %(message)s')
+# Configure logging to show INFO for debugging FFT issues
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 class H5Inspector(QMainWindow):
     """
@@ -39,7 +39,7 @@ class H5Inspector(QMainWindow):
         and status bar.
         """
         self.setWindowTitle("H5Inspector")
-        self.setGeometry(100, 100, 1400, 900)
+        self.setGeometry(100, 100, 1600, 900)
         
         # Central widget
         central_widget = QWidget()

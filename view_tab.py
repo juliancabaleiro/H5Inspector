@@ -65,13 +65,15 @@ class ViewTab(QWidget):
         self.plot_widget = PlotWidget()
         right_splitter.addWidget(self.plot_widget)
         
-        # Set initial sizes (50-50 split)
-        right_splitter.setSizes([300, 400])
+        # Set initial sizes (Table vs Plot) - More height for plot (~30% more)
+        right_splitter.setSizes([280, 520])
         
         main_splitter.addWidget(right_splitter)
         
-        # Set splitter sizes (30-70 split)
-        main_splitter.setSizes([300, 700])
+        # Set splitter sizes (Structure vs Data) - Wide structure layout
+        main_splitter.setSizes([900, 700])
+        main_splitter.setStretchFactor(0, 0)
+        main_splitter.setStretchFactor(1, 1)
         
         layout.addWidget(main_splitter)
     
@@ -267,7 +269,10 @@ class ViewTab(QWidget):
             return
             
         try:
-            data, columns = h5_utils.get_dataset_data(self.current_file, dataset_path)
+            # Load dataset data (unpacked robustly)
+            result = h5_utils.get_dataset_data(self.current_file, dataset_path)
+            data = result[0]
+            columns = result[1]
             
             # Simple heuristic: if it's 2D, use first column? Or if 1D just use it.
             if len(data.shape) == 1:
@@ -329,7 +334,10 @@ class ViewTab(QWidget):
         
         try:
             # Load dataset data
-            data, columns = h5_utils.get_dataset_data(self.current_file, dataset_path)
+            # Load dataset data (unpacked robustly)
+            result = h5_utils.get_dataset_data(self.current_file, dataset_path)
+            data = result[0]
+            columns = result[1]
             # logging.debug(f"ViewTab - Loaded data from {dataset_path}. Shape: {data.shape if data is not None else 'None'}, Columns: {columns}")
             
             # Display in table (limit rows for performance)
@@ -401,4 +409,5 @@ class ViewTab(QWidget):
             self.data_table.setColumnCount(1)
             self.data_table.setItem(0, 0, QTableWidgetItem(f"Error: {str(e)}"))
             self.plot_widget.clear_plot()
-            logging.error(f"Error displaying dataset: {e}")
+            import traceback
+            logging.error(f"Error displaying dataset: {e}\n{traceback.format_exc()}")

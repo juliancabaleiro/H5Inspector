@@ -68,7 +68,9 @@ class EditTab(QWidget):
         splitter.addWidget(comment_group)
         
         # Set splitter sizes
-        splitter.setSizes([500, 150])
+        splitter.setSizes([600, 200])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
         layout.addWidget(splitter)
         
         # Create button

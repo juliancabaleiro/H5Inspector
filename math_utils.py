@@ -31,10 +31,10 @@ def calculate_statistics(y_data: np.ndarray):
         y_float = y_data.astype(float)
         
         # Use nan-safe versions for robustness
-        stats['Average'] = np.nanmean(y_float)
+        stats['Mean'] = np.nanmean(y_float)
         stats['Max'] = np.nanmax(y_float)
         stats['Min'] = np.nanmin(y_float)
-        stats['Pk-Pk'] = stats['Max'] - stats['Min']
+        stats['Peak-to-Peak'] = stats['Max'] - stats['Min']
         stats['Std Dev'] = np.nanstd(y_float)
         
         # RMS calculation
@@ -107,21 +107,39 @@ def calculate_fft(signal: np.ndarray, fs: float = 1.0, window_name: str = "Recta
         return None
         
     # Remove DC component to avoid leakage from 0Hz
-    signal_ac = signal - np.nanmean(signal)
+    # signal_ac = signal - np.nanmean(signal)
+    # Using raw signal to show DC component if present, as requested by user observing "all zeros"
     
     # Apply window
     win = get_window(window_name, n)
     win_sum = np.sum(win)
     if win_sum == 0: win_sum = 1.0
     
-    windowed_signal = signal_ac * win
+    windowed_signal = signal * win
     
     # RFFT for real signals
     fft_vals = np.fft.rfft(windowed_signal)
     freqs = np.fft.rfftfreq(n, d=1.0/fs)
     
     # Magnitude (corrected for window and RFFT symmetry)
-    magnitude = 2.0 * np.abs(fft_vals) / win_sum
+    # For RFFT, we need to account for the fact that we only get positive frequencies
+    # The normalization should be: abs(fft) / N for DC and Nyquist, 2*abs(fft) / N for others
+    # But we're using windowing, so we normalize by window sum instead of N
+    
+    magnitude = np.abs(fft_vals) / n  # Normalize by signal length first
+    
+    # Apply window correction factor
+    # The coherent gain of the window is sum(window)/N
+    coherent_gain = win_sum / n
+    if coherent_gain > 0:
+        magnitude = magnitude / coherent_gain
+    
+    # For RFFT, multiply by 2 to account for negative frequencies (except DC and Nyquist)
+    if len(magnitude) > 1:
+        magnitude[1:] *= 2.0
+        # If we have Nyquist frequency (even length signal), don't double it
+        if n % 2 == 0:
+            magnitude[-1] /= 2.0
     
     # Phase
     phase = np.angle(fft_vals)

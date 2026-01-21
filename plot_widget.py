@@ -2,144 +2,37 @@
 @author: Julian Cabaleiro
 @repository: https://github.com/juliancabaleiro/H5Inspector
 
-Interactive Plot Widget using Plotly
+Interactive Plot Widget using Matplotlib
 Provides interactive plotting with dual cursors and statistics
 """
 
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, 
-                             QLabel, QPushButton, QGroupBox, QGridLayout, QFileDialog, QMessageBox, QCheckBox)
-from PyQt5.QtCore import Qt, QUrl, pyqtSlot, QObject, QTimer, pyqtSignal
-from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
-from PyQt5.QtWebChannel import QWebChannel
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+                             QLabel, QPushButton, QGroupBox, QGridLayout, QFileDialog, QMessageBox, QCheckBox, QLineEdit)
+from PyQt5.QtCore import Qt, pyqtSlot, QObject, QTimer, pyqtSignal
+import matplotlib
+matplotlib.use('Qt5Agg')
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
+from matplotlib.ticker import EngFormatter
 import numpy as np
 import pandas as pd
 from typing import Optional, Tuple
 import math_utils
-import json
-import os
-import tempfile
 import logging
-
-
-class WebPage(QWebEnginePage):
-    """
-    Custom web page to capture console logs from the embedded browser.
-    """
-    def javaScriptConsoleMessage(self, level, message, line, sourceID):
-        """
-        Handle JavaScript console messages.
-        
-        Parameters
-        ----------
-        level : int
-            Log level.
-        message : str
-            Log message.
-        line : int
-            Line number.
-        sourceID : str
-            Source ID.
-        """
-        # logging.debug(f"JS Console [{level}]: {message} (line {line})")
-
-
-class CursorBridge(QObject):
-    """
-    Bridge for communication between JS (Plotly) and Python.
-    """
-    def __init__(self, parent):
-        """
-        Initialize the bridge.
-        """
-        super().__init__(parent)
-        self.parent = parent
-        self._last_cursor_moved = 2 # Start by moving P1 (alternating)
-
-    @pyqtSlot(float, float)
-    def on_click(self, x, y):
-        """
-        Called when user clicks on the plot.
-        
-        Parameters
-        ----------
-        x : float
-            X coordinate of the click.
-        y : float
-            Y coordinate of the click.
-        """
-        # logging.debug(f"CursorBridge.on_click - x={x}, mode={self.parent.active_cursor_mode}")
-        
-        # Respect the selected cursor mode
-        if self.parent.active_cursor_mode == 'p1':
-            self.parent.cursor1_pos = x
-        elif self.parent.active_cursor_mode == 'p2':
-            self.parent.cursor2_pos = x
-        else:
-            # 'auto' - alternating behavior
-            if self._last_cursor_moved == 1:
-                self.parent.cursor2_pos = x
-                self._last_cursor_moved = 2
-            else:
-                self.parent.cursor1_pos = x
-                self._last_cursor_moved = 1
-        
-        # Move cursor in JS for fluidity, then update stats in Python
-        self.parent.move_cursors_js()
-        # Emit signal so other components (AnalysisTab) update their parameters
-        self.parent.cursorsMoved.emit(self.parent.cursor1_pos, self.parent.cursor2_pos)
-
-    @pyqtSlot(float, float)
-    def on_move(self, x1, x2):
-        """
-        Called for real-time updates (during or after movement).
-        
-        Parameters
-        ----------
-        x1 : float
-            Position of cursor 1.
-        x2 : float
-            Position of cursor 2.
-        """
-        self.parent.cursor1_pos = x1
-        self.parent.cursor2_pos = x2
-        self.parent.update_statistics_only()
-        # Emit signal for other components (like AnalysisTab) to react
-        self.parent.cursorsMoved.emit(x1, x2)
-
-    @pyqtSlot(str)
-    def on_error(self, message):
-        """
-        Log errors from the JS/Plotly frontend.
-        
-        Parameters
-        ----------
-        message : str
-            Error message from frontend.
-        """
-        logging.error(f"FRONTEND ERROR: {message}")
-
-    @pyqtSlot()
-    def on_ready(self):
-        """
-        Signal that the plot has finished rendering.
-
-        Triggers logs or actions once Plotly is fully loaded in the browser.
-        """
-        # logging.debug(f"Plotly render COMPLETE for {self.parent.dataset_name}")
-
+import os
 
 class PlotWidget(QWidget):
     """
-    Interactive plot widget with Plotly integration.
+    Interactive plot widget with Matplotlib integration.
     
     Provides capabilities for plotting 1D/2D data, interacting with cursors,
     calculating statistics, and exporting data.
     """
     
-    # Signals
-    cursorsMoved = pyqtSignal(float, float)
+    # Signals for external components
+    cursorsMoved = pyqtSignal(float, float) # (p1_pos, p2_pos)
     rangeChanged = pyqtSignal()
     
     def __init__(self, parent=None):
@@ -152,123 +45,139 @@ class PlotWidget(QWidget):
             Parent widget, by default None.
         """
         super().__init__(parent)
+        
+        # Data storage
         self.data = None
         self.columns = []
+        self.dataset_name = ""
+        self.current_x_series = None
+        self.current_y_series = None
+        self.external_x_data = None
+        self.external_x_name = ""
+        
+        # Plot state
+        self.x_axis_type = 'linear'
+        self.plot_style = 'line'
+        self.active_cursor_mode = 'off'
         self.cursor1_pos = None
         self.cursor2_pos = None
-        self.dataset_name = ""
-        self.current_x_series = None # For stats calculation
-        self.current_y_series = None
-        self.active_cursor_mode = 'off' # 'p1', 'p2', 'auto', or 'off'
-        self.x_axis_type = 'linear' # 'linear' or 'log'
-        self.plot_style = 'line' # 'line' or 'stem'
         
-        # Set up QWebChannel for JS-Python communication
-        self.channel = QWebChannel()
-        self.bridge = CursorBridge(self)
-        self.channel.registerObject("bridge", self.bridge)
+        # Matplotlib interactive state
+        self.dragging_cursor = None # 0 for P1, 1 for P2, None
+        self.cursor_pick_threshold = 15 # Pixels
+        
+        # Color Palette (Consistent with App CSS and Modern Aesthetics)
+        self.colors = {
+            'main': '#1f77b4',      # Standard Plotly/Matplotlib Blue
+            'p1': '#e74c3c',        # Alizarin Red
+            'p2': '#27ae60',        # Nephritis Green
+            'fill': '#3498db',      # Peter River Blue
+            'bg': '#ffffff',
+            'grid': '#f1f2f6',
+            'text': '#2f3542'
+        }
         
         self.setup_ui()
-        self.plot_view.setPage(WebPage(self.plot_view))
-        self.plot_view.page().setWebChannel(self.channel)
         
-        # Initialize with a welcome message
-        self.plot_view.setHtml("<div style='display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif;'><h3>Select a dataset to plot</h3></div>")
-    
     def setup_ui(self):
         """
         Setup the user interface.
         
         Creates controls for axis selection, cursor modes, export button,
-        the web view for the plot, and the statistics panel.
+        the Matplotlib canvas, and the statistics panel.
         """
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         
-        # Axis selection controls
+        # Top Controls Bar
         self.controls_layout = QHBoxLayout()
         
+        # Axis Selection
         self.x_axis_label = QLabel("X Axis:")
-        self.controls_layout.addWidget(self.x_axis_label)
         self.x_axis_combo = QComboBox()
         self.x_axis_combo.currentIndexChanged.connect(self.update_plot)
-        self.controls_layout.addWidget(self.x_axis_combo)
         
         self.y_axis_label = QLabel("Y Axis:")
-        self.controls_layout.addWidget(self.y_axis_label)
         self.y_axis_combo = QComboBox()
         self.y_axis_combo.currentIndexChanged.connect(self.update_plot)
-        self.controls_layout.addWidget(self.y_axis_combo)
         
+        self.controls_layout.addWidget(self.x_axis_label)
+        self.controls_layout.addWidget(self.x_axis_combo)
+        self.controls_layout.addSpacing(10)
+        self.controls_layout.addWidget(self.y_axis_label)
+        self.controls_layout.addWidget(self.y_axis_combo)
         self.controls_layout.addSpacing(20)
         
-        # Cursor selection buttons
+        # Plot Range Percentage
+        self.range_label = QLabel("Range (%):")
+        self.start_input = QLineEdit("0")
+        self.start_input.setFixedWidth(50)
+        self.start_input.setToolTip("Start %")
+        self.start_input.textChanged.connect(self.validate_range_ui)
+        self.start_input.returnPressed.connect(self.update_plot)
+        
+        self.end_input = QLineEdit("100")
+        self.end_input.setFixedWidth(50)
+        self.end_input.setToolTip("End %")
+        self.end_input.textChanged.connect(self.validate_range_ui)
+        self.end_input.returnPressed.connect(self.update_plot)
+        
+        self.controls_layout.addWidget(self.range_label)
+        self.controls_layout.addWidget(self.start_input)
+        self.controls_layout.addWidget(QLabel("-"))
+        self.controls_layout.addWidget(self.end_input)
+        self.controls_layout.addSpacing(20)
+        
+        # Add spacing before cursors section
+        self.controls_layout.addSpacing(15)
+        
+        # Cursor Mode
         self.controls_layout.addWidget(QLabel("Cursors:"))
         
-        base_style = """
+        # Cursor Button Styles - White background with soft colors
+        cursor_btn_base_style = """
             QPushButton { 
-                padding: 5px 12px; 
-                font-size: 9pt; 
-                border: 2px solid #DCDDE1;
-                border-radius: 5px;
-                background-color: white;
-                color: #57606f;
-            }
-            QPushButton:hover { background-color: #F1F2F6; }
-        """
-        
-        style_c1 = base_style + """
-            QPushButton:checked { 
-                background-color: #ff7675; 
-                border-color: #d63031;
-                color: white;
+                background-color: #ffffff; 
+                color: #2c3e50;
+                border: 2px solid #bdc3c7; 
+                border-radius: 4px;
                 font-weight: bold;
+                padding: 4px 8px;
             }
-        """
-        style_c2 = base_style + """
-            QPushButton:checked { 
-                background-color: #55efc4; 
-                border-color: #00b894;
-                color: #2d3436;
-                font-weight: bold;
+            QPushButton:hover { 
+                background-color: #f7f9f9;
+                border: 2px solid #95a5a6;
             }
-        """
-        style_auto = base_style + """
             QPushButton:checked { 
-                background-color: #74b9ff; 
-                border-color: #0984e3;
-                color: white;
-                font-weight: bold;
-            }
-        """
-        style_off = base_style + """
-            QPushButton:checked { 
-                background-color: #b2bec3; 
-                border-color: #636e72;
-                color: white;
+                color: white; 
+                border: 2px solid #2c3e50;
                 font-weight: bold;
             }
         """
         
         self.btn_p1 = QPushButton("Cursor 1")
         self.btn_p1.setCheckable(True)
-        self.btn_p1.setStyleSheet(style_c1)
+        self.btn_p1.setFixedWidth(75)
+        self.btn_p1.setStyleSheet(cursor_btn_base_style + "QPushButton:checked { background-color: #e74c3c; }")
         self.btn_p1.clicked.connect(lambda: self.set_cursor_mode('p1'))
         
         self.btn_p2 = QPushButton("Cursor 2")
         self.btn_p2.setCheckable(True)
-        self.btn_p2.setStyleSheet(style_c2)
+        self.btn_p2.setFixedWidth(75)
+        self.btn_p2.setStyleSheet(cursor_btn_base_style + "QPushButton:checked { background-color: #27ae60; }")
         self.btn_p2.clicked.connect(lambda: self.set_cursor_mode('p2'))
         
         self.btn_auto = QPushButton("Auto")
         self.btn_auto.setCheckable(True)
-        self.btn_auto.setChecked(False) # Unchecked by default
-        self.btn_auto.setStyleSheet(style_auto)
+        self.btn_auto.setFixedWidth(55)
+        self.btn_auto.setStyleSheet(cursor_btn_base_style + "QPushButton:checked { background-color: #3498db; }")
         self.btn_auto.clicked.connect(lambda: self.set_cursor_mode('auto'))
         
         self.btn_off = QPushButton("Off")
         self.btn_off.setCheckable(True)
-        self.btn_off.setChecked(True) # Checked by default
-        self.btn_off.setStyleSheet(style_off)
+        self.btn_off.setChecked(True)
+        self.btn_off.setFixedWidth(50)
+        self.btn_off.setStyleSheet(cursor_btn_base_style + "QPushButton:checked { background-color: #34495e; }")
         self.btn_off.clicked.connect(lambda: self.set_cursor_mode('off'))
         
         self.controls_layout.addWidget(self.btn_p1)
@@ -278,176 +187,169 @@ class PlotWidget(QWidget):
         
         self.controls_layout.addStretch()
         
-        # Export button
+        # Export Button - Soft green style
         self.export_btn = QPushButton("Export CSV")
-        self.export_btn.setObjectName("successButton")
         self.export_btn.clicked.connect(self.export_to_csv)
         self.export_btn.setEnabled(False)
+        export_btn_style = """
+            QPushButton {
+                background-color: #a9dfbf;
+                color: #145a32;
+                border: 2px solid #82e0aa;
+                border-radius: 4px;
+                font-weight: bold;
+                padding: 5px 12px;
+            }
+            QPushButton:hover:enabled {
+                background-color: #52be80;
+                border: 2px solid #27ae60;
+                color: white;
+            }
+            QPushButton:pressed:enabled {
+                background-color: #27ae60;
+                border: 2px solid #1e8449;
+            }
+            QPushButton:disabled {
+                background-color: #d5d8dc;
+                color: #95a5a6;
+                border: 2px solid #bdc3c7;
+            }
+        """
+        self.export_btn.setStyleSheet(export_btn_style)
         self.controls_layout.addWidget(self.export_btn)
         
         layout.addLayout(self.controls_layout)
         
-        # New: Plot Limit Inputs (End %)
-        self.frag_layout = QHBoxLayout()
-        self.frag_layout.addWidget(QLabel("Plot Range: 0% to"))
+        # Matplotlib Figure and Canvas - Reduced size to prevent label overlap
+        self.figure = Figure(figsize=(5, 3.2), dpi=100)
+        self.canvas = FigureCanvas(self.figure)
+        self.ax = self.figure.add_subplot(111)
+        # Adjust subplot to prevent label cutoff
+        self.figure.subplots_adjust(bottom=0.15, top=0.92, left=0.12, right=0.95)
         
-        from PyQt5.QtWidgets import QLineEdit
+        # Initialize cursor lines and fill (hidden) - Thinner lines
+        self.line_p1 = self.ax.axvline(0, color=self.colors['p1'], linestyle='--', linewidth=1.0, visible=False, zorder=10)
+        self.line_p2 = self.ax.axvline(0, color=self.colors['p2'], linestyle='--', linewidth=1.0, visible=False, zorder=10)
+        self.region_fill = self.ax.axvspan(0, 0, color=self.colors['fill'], alpha=0.15, visible=False, zorder=5)
         
-        # End Input
-        self.end_input = QLineEdit("50")
-        self.end_input.setFixedWidth(60)
-        self.end_input.setStyleSheet("font-size: 10pt; font-weight: bold;")
-        self.end_input.setPlaceholderText("100")
-        self.end_input.editingFinished.connect(self.update_plot)
-        self.end_input.textChanged.connect(self.validate_range_ui) # Immediate feedback
-        self.frag_layout.addWidget(self.end_input)
+        # Toolbar
+        self.toolbar = NavigationToolbar(self.canvas, self)
         
-        self.frag_layout.addWidget(QLabel("%"))
-        self.frag_layout.addStretch()
+        # Create a container for the canvas to apply styling from QSS if needed
+        self.plot_container = QWidget()
+        self.plot_container.setObjectName("plotContainer")
+        container_layout = QVBoxLayout(self.plot_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.addWidget(self.canvas)
+        container_layout.addWidget(self.toolbar)
         
-        layout.addLayout(self.frag_layout)
-
-
-        # Plotly web view
-        self.plot_view = QWebEngineView()
-        self.plot_view.setMinimumHeight(400)
-        # Set a white background to match Plotly and verify visibility
-        self.plot_view.setStyleSheet("background-color: white;")
-        layout.addWidget(self.plot_view, stretch=3)
+        layout.addWidget(self.plot_container)
         
-        # Statistics group
-        stats_group = QGroupBox("Statistics (between cursors)")
+        # Connect Matplotlib events
+        self.canvas.mpl_connect('button_press_event', self.on_click)
+        self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
+        self.canvas.mpl_connect('button_release_event', self.on_release)
+        
+        # Statistics Panel
+        self.stats_group = QGroupBox("Statistics (between cursors)")
         stats_layout = QGridLayout()
         
-        # Labels for statistics
         self.stats_labels = {}
-        stats = ['Average', 'RMS', 'Pk-Pk', 'Max', 'Min', 'Std Dev']
-        for i, stat in enumerate(stats):
-            label = QLabel(f"{stat}:")
-            label.setStyleSheet("font-weight: bold;")
-            value = QLabel("---")
-            value.setObjectName(f"stat_{stat.lower().replace(' ', '_')}")
-            
-            stats_layout.addWidget(label, i // 3, (i % 3) * 2)
-            stats_layout.addWidget(value, i // 3, (i % 3) * 2 + 1)
-            
-            self.stats_labels[stat] = value
+        row, col = 0, 0
+        stat_names = ["Min", "Max", "Mean", "Std Dev", "RMS", "Peak-to-Peak"]
+        for name in stat_names:
+            stats_layout.addWidget(QLabel(f"{name}:"), row, col)
+            label = QLabel("---")
+            label.setStyleSheet("font-weight: bold; color: #2C3E50;")
+            stats_layout.addWidget(label, row, col + 1)
+            self.stats_labels[name] = label
+            col += 2
+            if col >= 6:
+                col = 0
+                row += 1
+                
+        self.stats_group.setLayout(stats_layout)
+        layout.addWidget(self.stats_group)
         
-        stats_group.setLayout(stats_layout)
-        self.stats_group = stats_group
-        layout.addWidget(self.stats_group, stretch=1)
-
     def validate_range_ui(self):
         """
         Provide immediate visual feedback for range inputs.
-
-        Checks the validity of the percentage input in the UI and applies
-        error styles (red background) if the values are out of bounds.
         """
+        error_style = "font-size: 10pt; font-weight: bold; background-color: #fab1a0; border: 2px solid #e17055;"
+        normal_style = "font-size: 10pt; font-weight: bold; background-color: white; border: 1px solid #DCDDE1;"
+        
+        # Validate Start
         try:
-            e_txt = self.end_input.text().strip().replace(',', '.').replace('%', '')
-            e = float(e_txt) if e_txt else 100.0
-            
-            error_style = "font-size: 10pt; font-weight: bold; background-color: #fab1a0; border: 2px solid #e17055;"
-            normal_style = "font-size: 10pt; font-weight: bold; background-color: white; border: 1px solid #DCDDE1;"
-            
-            e_valid = 0 < e <= 100
-            
-            self.end_input.setStyleSheet(normal_style if e_valid else error_style)
+            txt_s = self.start_input.text().strip().replace(',', '.').replace('%', '')
+            if not txt_s:
+                self.start_input.setStyleSheet(normal_style)
+            else:
+                 val_s = float(txt_s)
+                 if 0 <= val_s < 100:
+                     self.start_input.setStyleSheet(normal_style)
+                 else:
+                     self.start_input.setStyleSheet(error_style)
         except ValueError:
-            pass
-    
+            self.start_input.setStyleSheet(error_style)
+
+        # Validate End
+        try:
+            txt_e = self.end_input.text().strip().replace(',', '.').replace('%', '')
+            if not txt_e:
+                self.end_input.setStyleSheet(normal_style)
+            else:
+                val_e = float(txt_e)
+                if 0 < val_e <= 100:
+                    self.end_input.setStyleSheet(normal_style)
+                else:
+                    self.end_input.setStyleSheet(error_style)
+        except ValueError:
+            self.end_input.setStyleSheet(error_style)
+
     def set_data(self, data: np.ndarray, columns: list, dataset_name: str = "", x_axis_type: str = 'linear', plot_style: str = 'line'):
         """
         Set data for plotting.
-        
-        Parameters
-        ----------
-        data : np.ndarray
-            The dataset to plot.
-        columns : list
-            List of column names for the dataset.
-        dataset_name : str, optional
-            Name of the dataset, by default "".
-        x_axis_type : str, optional
-            Type of X axis ('linear' or 'log'), by default 'linear'.
-        plot_style : str, optional
-            Style of plot ('line' or 'stem'), by default 'line'.
         """
-        if data is None:
-            # logging.debug(f"set_data called with None for {dataset_name}")
-            self.clear_plot("No data to display (None)")
-            return
-            
-        # logging.debug(f"set_data called for dataset: {dataset_name}")
-        # logging.debug(f"Data shape: {data.shape}, dtype: {data.dtype}")
-        
         self.data = data
+        self.columns = columns
         self.dataset_name = dataset_name
         self.x_axis_type = x_axis_type
         self.plot_style = plot_style
         
-        # Block signals to avoid multiple update_plot calls during setup
+        # Update combo boxes
         self.x_axis_combo.blockSignals(True)
         self.y_axis_combo.blockSignals(True)
-        
         try:
+            prev_x = self.x_axis_combo.currentText()
+            prev_y = self.y_axis_combo.currentText()
+            
             self.x_axis_combo.clear()
             self.y_axis_combo.clear()
             
-            # Determine available columns
-            if data.dtype.names:
-                # Structured array (Compound type) - use field names
-                self.columns = list(data.dtype.names)
-            elif len(data.shape) == 1:
-                # Simple 1D array
-                self.columns = ['Value']
-            elif len(data.shape) == 2:
-                # Simple 2D array
-                if not columns or len(columns) != data.shape[1]:
-                    self.columns = [f'Col_{i}' for i in range(data.shape[1])]
-                else:
-                    self.columns = columns
+            # Add 'Index' as default X option
+            self.x_axis_combo.addItem("Index")
+            
+            # Add external X if available
+            if self.external_x_data is not None:
+                self.x_axis_combo.addItem(f"External: {self.external_x_name}")
+            
+            self.x_axis_combo.addItems(columns)
+            self.y_axis_combo.addItems(columns)
+            
+            # Restore selections if possible
+            if prev_x and self.x_axis_combo.findText(prev_x) >= 0:
+                self.x_axis_combo.setCurrentText(prev_x)
             else:
-                self.columns = []
-            
-            # Always add Index option
-            axis_options = ['Index'] + self.columns
-            self.x_axis_combo.addItems(axis_options)
-            self.y_axis_combo.addItems(axis_options)
-            
-            # [SMART DEFAULT SELECTION]
-            x_idx = 0 # Default to Index
-            y_idx = 1 # Default to first data column (Index is 0)
-            
-            # Look for Frequency for X
-            for i, col in enumerate(axis_options):
-                if "freq" in col.lower():
-                    x_idx = i
-                    break
-            
-            # Look for Magnitude or Value or Column_0 for Y
-            y_candidates = ["magnitude", "mag", "value", "column_0", "val"]
-            found_y = False
-            for cand in y_candidates:
-                for i, col in enumerate(axis_options):
-                    if i == x_idx: continue # Don't select the same as X
-                    if cand in col.lower():
-                        y_idx = i
-                        found_y = True
-                        break
-                if found_y: break
-            
-            if len(axis_options) > x_idx:
-                self.x_axis_combo.setCurrentIndex(x_idx)
-            if len(axis_options) > y_idx:
-                self.y_axis_combo.setCurrentIndex(y_idx)
-            
-            # If we had an external X selected, keep it if possible
-            if getattr(self, 'external_x_name', None):
-                idx = self.x_axis_combo.findText(f"External: {self.external_x_name}")
-                if idx >= 0:
-                    self.x_axis_combo.setCurrentIndex(idx)
+                # Default heuristic
+                if len(columns) >= 2:
+                    self.x_axis_combo.setCurrentIndex(1) # Likely first data column
+                else:
+                    self.x_axis_combo.setCurrentIndex(0) # Index
+                    
+            if prev_y and self.y_axis_combo.findText(prev_y) >= 0:
+                self.y_axis_combo.setCurrentText(prev_y)
+            else:
+                self.y_axis_combo.setCurrentIndex(0)
                     
         finally:
             self.x_axis_combo.blockSignals(False)
@@ -459,30 +361,16 @@ class PlotWidget(QWidget):
             self.cursor2_pos = 1.0
             
         self.export_btn.setEnabled(len(self.columns) > 0)
-        try:
-            # Auto-calculate display limits based on data size (Performance)
-            if self.data is not None:
-                # Assuming simple 1D or 2D structure length
-                point_count = len(self.data)
-                self.auto_calc_limit(point_count)
+        
+        # Auto-calculate display limits
+        if self.data is not None:
+            self.auto_calc_limit(len(self.data))
             
-            # logging.debug(f"Triggering update_plot for {dataset_name}")
-            self.update_plot()
-        except Exception as e:
-            logging.error(f"CRITICAL ERROR in set_data invoking update_plot: {e}")
-            import traceback
-            traceback.print_exc()
+        self.update_plot()
 
     def set_external_x(self, data: np.ndarray, name: str):
         """
         Set an external dataset to be used as X-axis.
-        
-        Parameters
-        ----------
-        data : np.ndarray
-            Data to use for X-axis.
-        name : str
-            Name of the external dataset.
         """
         self.external_x_data = data
         self.external_x_name = name
@@ -490,7 +378,6 @@ class PlotWidget(QWidget):
         # Update combo box
         self.x_axis_combo.blockSignals(True)
         try:
-            # Check if already exists
             idx = self.x_axis_combo.findText(f"External: {name}")
             if idx < 0:
                 self.x_axis_combo.addItem(f"External: {name}")
@@ -503,11 +390,6 @@ class PlotWidget(QWidget):
     def set_cursor_mode(self, mode):
         """
         Set the active cursor mode and update button states.
-        
-        Parameters
-        ----------
-        mode : str
-            One of 'p1', 'p2', 'auto', 'off'.
         """
         self.active_cursor_mode = mode
         self.btn_p1.setChecked(mode == 'p1')
@@ -515,58 +397,38 @@ class PlotWidget(QWidget):
         self.btn_auto.setChecked(mode == 'auto')
         self.btn_off.setChecked(mode == 'off')
         
-        # Immediate JS update to hide/show cursors
-        if mode == 'off':
-            self.plot_view.page().runJavaScript("hideCursorsJS(true);")
-        else:
-            self.plot_view.page().runJavaScript("hideCursorsJS(false);")
-            self.move_cursors_js()
-            
+        self.update_cursor_visibility()
         self.update_statistics_only()
-        # Emit signal to inform AnalysisTab that parameters need update (e.g. following mode change)
+        
+        # Emit signal
         self.cursorsMoved.emit(self.cursor1_pos if self.cursor1_pos is not None else 0.0, 
                                self.cursor2_pos if self.cursor2_pos is not None else 0.0)
-        # logging.debug(f"Active cursor mode set to {mode}")
+
+    def update_cursor_visibility(self):
+        """Update Matplotlib cursor visibility based on mode."""
+        visible = (self.active_cursor_mode != 'off')
+        self.line_p1.set_visible(visible)
+        self.line_p2.set_visible(visible)
+        self.region_fill.set_visible(visible)
+        
+        if visible:
+            self.sync_cursor_visuals()
+            
+        self.canvas.draw_idle()
 
     def set_axis_selectors_visible(self, visible: bool):
-        """
-        Show or hide the default X/Y axis selectors and labels.
-        
-        Parameters
-        ----------
-        visible : bool
-            True to show, False to hide.
-        """
+        """Show or hide the default X/Y axis selectors and labels."""
         self.x_axis_label.setVisible(visible)
         self.x_axis_combo.setVisible(visible)
         self.y_axis_label.setVisible(visible)
         self.y_axis_combo.setVisible(visible)
 
     def set_stats_visible(self, visible: bool):
-        """
-        Show or hide the statistics panel.
-        
-        Parameters
-        ----------
-        visible : bool
-            True to show, False to hide.
-        """
+        """Show or hide the statistics panel."""
         self.stats_group.setVisible(visible)
 
     def get_column_data(self, column_name: str) -> np.ndarray:
-        """
-        Extract data for a specific column name.
-        
-        Parameters
-        ----------
-        column_name : str
-            Name of the column to retrieve.
-            
-        Returns
-        -------
-        np.ndarray
-            Data array for the requested column.
-        """
+        """Extract data for a specific column name."""
         if column_name == 'Index':
             if self.data is not None:
                 return np.arange(len(self.data))
@@ -577,11 +439,9 @@ class PlotWidget(QWidget):
             
         try:
             val = None
-            # Handle 1D array
             if len(self.data.shape) == 1:
                 if column_name == 'Value' or column_name == self.columns[0]:
                     val = self.data
-            # Handle 2D array
             elif len(self.data.shape) == 2:
                 try:
                     col_idx = self.columns.index(column_name)
@@ -591,66 +451,38 @@ class PlotWidget(QWidget):
             
             if val is not None:
                 return val.astype(float)
-                
         except Exception as e:
             logging.error(f"Error getting column data for {column_name}: {e}")
             
         return np.array([0.0])
     
     def auto_calc_limit(self, total_points: int):
-        """
-        Auto-calculate start/end % to keep points within a safe limit.
-
-        Adjusts the 'end_input' percentage to ensure the plotted data stays 
-        below a predefined threshold for performance reasons.
-
-        Parameters
-        ----------
-        total_points : int
-            Total number of data points in the series.
-        """
-        # No auto-limit for FFT/Stem style
+        """Auto-calculate start/end % to keep points within a safe limit."""
         if self.plot_style == 'stem':
             return
-
-        SAFE_LIMIT = 10000
-        if total_points <= SAFE_LIMIT:
-            self.end_input.setText("50")
-        else:
-            pct_needed = (SAFE_LIMIT / total_points) * 100.0
-            final_pct = min(50.0, pct_needed)
-            self.end_input.setText(f"{final_pct:.2f}")
+        
+        # Set Full Range by default as requested
+        self.start_input.setText("0")
+        self.end_input.setText("100")
 
     def update_plot(self):
-        """
-        Redraw the plot with current axis and data.
-
-        Gathers the current column selections, slices the data according to the
-        range settings, applies log/linear scaling, and generates the Plotly
-        HTML for display in the QWebEngineView.
-        """
-        # Prepare data for plotting
+        """Redraw the plot with current axis and data."""
         x_col = self.x_axis_combo.currentText()
         y_col = self.y_axis_combo.currentText()
         
-        # logging.debug(f"update_plot - X='{x_col}', Y='{y_col}'")
-        
         if not x_col or not y_col:
-            # logging.debug(f"update_plot - missing axis")
             return
             
         x_data = self.get_column_data(x_col)
         y_data = self.get_column_data(y_col)
         
         if x_data is None or y_data is None or len(x_data) == 0:
-            # logging.debug(f"update_plot - no data series")
             return
             
-        # Store for statistics calculation
         self.current_x_series = x_data
         self.current_y_series = y_data
         
-        # Initialize cursors if not set or out of bounds
+        # Initialize cursors if out of bounds
         try:
             x_min_data = np.nanmin(x_data)
             x_max_data = np.nanmax(x_data)
@@ -658,457 +490,243 @@ class PlotWidget(QWidget):
                 self.cursor1_pos = 0.0
                 self.cursor2_pos = 1.0
             else:
-                # Initialize cursors to 10% and 90% of range if not set
                 if self.cursor1_pos is None:
                     self.cursor1_pos = float(x_min_data + (x_max_data - x_min_data) * 0.1)
                 if self.cursor2_pos is None:
                     self.cursor2_pos = float(x_min_data + (x_max_data - x_min_data) * 0.9)
                 
-                # Boundary check - if cursors are way out of current data range, reset them
-                if self.cursor1_pos < x_min_data - (x_max_data - x_min_data)*2 or \
-                   self.cursor1_pos > x_max_data + (x_max_data - x_min_data)*2:
+                # Check bounds
+                margin = (x_max_data - x_min_data) * 2
+                if self.cursor1_pos < x_min_data - margin or self.cursor1_pos > x_max_data + margin:
                     self.cursor1_pos = float(x_min_data + (x_max_data - x_min_data) * 0.1)
-                if self.cursor2_pos < x_min_data - (x_max_data - x_min_data)*2 or \
-                   self.cursor2_pos > x_max_data + (x_max_data - x_min_data)*2:
+                if self.cursor2_pos < x_min_data - margin or self.cursor2_pos > x_max_data + margin:
                     self.cursor2_pos = float(x_min_data + (x_max_data - x_min_data) * 0.9)
-        except (ValueError, TypeError):
+        except:
             self.cursor1_pos = 0.0
             self.cursor2_pos = 1.0
-        
-        # FRAGMENT VIEW (End % only, start always 0%)
-        start_pct = 0.0
-        
-        # Helper to parse and styling
-        def parse_input(line_edit, default_val):
-            # Strip whitespace and common units/symbols
-            txt = line_edit.text().strip().replace(',', '.').replace('%', '').replace(' ', '')
-            try:
-                if not txt: return default_val
-                val = float(txt)
-                return val
-            except ValueError:
-                logging.error(f"Failed to parse input '{txt}' for percentage, using default {default_val}")
-                return default_val
 
-        end_pct = parse_input(self.end_input, 50.0)
-            
-        # Clamp and ensure validity
-        end_pct = max(0.1, min(100.0, end_pct))
-            
-        # Calculate indices based on percentage of TOTAL points
-        total_len = len(x_data)
+        # Range slicing (Start and End)
+        try:
+            txt_s = self.start_input.text().strip().replace(',', '.').replace('%', '')
+            start_pct = float(txt_s) if txt_s else 0.0
+        except ValueError:
+            start_pct = 0.0
+
+        try:
+            txt_e = self.end_input.text().strip().replace(',', '.').replace('%', '')
+            end_pct = float(txt_e) if txt_e else 100.0
+        except ValueError:
+            end_pct = 100.0
         
-        # Round to nearest integer index with safety margin
-        idx_start = 0
+        start_pct = max(0.0, min(99.9, start_pct))
+        end_pct = max(start_pct + 0.01, min(100.0, end_pct))
+        
+        total_len = len(x_data)
+        idx_start = int(max(0, min(total_len - 1, total_len * (start_pct / 100.0))))
         idx_end = int(max(1, min(total_len, total_len * (end_pct / 100.0))))
         
-        # Final UI Feedback for invalid ranges before plotting
-        error_style = "font-size: 10pt; font-weight: bold; background-color: #fab1a0; border: 2px solid #e17055;"
-        normal_style = "font-size: 10pt; font-weight: bold; background-color: white; border: 1px solid #DCDDE1;"
+        # If using logarithmic scale and starting at index 0, skip to index 1 to avoid log(0)
+        # This is common for FFT where index 0 is the DC component at 0 Hz
+        if self.x_axis_type == 'log' and idx_start == 0 and total_len > 1:
+            # Check if x_data[0] is zero or very close to zero
+            if x_data[0] <= 1e-10:
+                idx_start = 1
         
-        if end_pct <= 0 or end_pct > 100:
-            self.end_input.setStyleSheet(error_style)
-        else:
-            self.end_input.setStyleSheet(normal_style)
-
-        # SLICE THE DATA FRESH (No Truncation)
+        if idx_start >= idx_end:
+            idx_start = max(0, idx_end - 1)
+        
         x_plot = x_data[idx_start:idx_end]
         y_plot = y_data[idx_start:idx_end]
 
-        # Emit that range has changed
         self.rangeChanged.emit()
         
         title = self.dataset_name or f"{y_col} vs {x_col}"
         if start_pct > 0 or end_pct < 100:
             title += f" (Range: {start_pct:.2f}% - {end_pct:.2f}%)"
             
-        # Filter valid data for Log X if needed (Global filter)
-        if self.x_axis_type == 'log':
-             valid_mask = (x_plot > 0) & np.isfinite(x_plot)
-             if np.any(valid_mask):
-                 x_p_list = x_plot[valid_mask].tolist()
-                 y_p_list = y_plot[valid_mask].tolist()
-                 # Re-assign x_plot as well for range calculations later
-                 x_plot = x_plot[valid_mask]
-                 y_plot = y_plot[valid_mask]
-             else:
-                 # Fallback if everything is <= 0
-                 x_p_list, y_p_list = [], []
-        else:
-             # Fast numeric conversion for linear
-             x_p_list = x_plot.tolist()
-             y_p_list = y_plot.tolist()
-
-        num_points = len(x_p_list)
-        if num_points == 0:
-            self.plot_view.setHtml("<div style='display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif;'><h3>No valid data points to plot</h3></div>")
-            return
-
-        # Create the plot configuration
-        config = {
-            'responsive': True, 
-            'displaylogo': False, 
-            'scrollZoom': True,
-            'editable': False, # Manual dragging is more fluid
-            'modeBarButtonsToRemove': ['lasso2d']
-        }
+        # Clear main artists but keep our cursors
+        self.ax.clear()
         
-        # Build traces based on style
-        data_traces = []
+        # Redraw cursors (hidden or visible) - Thinner lines
+        self.line_p1 = self.ax.axvline(self.cursor1_pos, color=self.colors['p1'], linestyle='--', linewidth=1.0, zorder=10)
+        self.line_p2 = self.ax.axvline(self.cursor2_pos, color=self.colors['p2'], linestyle='--', linewidth=1.0, zorder=10)
+        c_min, c_max = sorted([self.cursor1_pos, self.cursor2_pos])
+        self.region_fill = self.ax.axvspan(c_min, c_max, color=self.colors['fill'], alpha=0.15, zorder=5)
         
+        self.update_cursor_visibility()
+
+        # Plot data
+        color = self.colors['main']
         if self.plot_style == 'stem':
-            # Adaptive Strategy:
-            # If few points, show pretty Stems (Lines + Markers).
-            POINT_THRESHOLD_STEM = 5000 
-            
-            num_points = len(x_p_list)
-
-            if num_points <= POINT_THRESHOLD_STEM:
-                # LOW DENSITY: Draw actual Stems using SVG (scatter)
-                try:
-                    full_min = np.nanmin(self.current_y_series) if self.current_y_series is not None else 0
-                    if np.isnan(full_min): full_min = 0
-                    base_y = full_min if full_min < 0 else 0
-                except: base_y = 0
-                
-                stem_x = []
-                stem_y = []
-                for x, y in zip(x_p_list, y_p_list):
-                    if x is not None and y is not None:
-                        stem_x.extend([x, x, None])
-                        stem_y.extend([base_y, y, None])
-                
-                data_traces.append({
-                    'x': stem_x,
-                    'y': stem_y,
-                    'type': 'scatter', 
-                    'mode': 'lines',
-                    'line': {'color': '#2E86DE', 'width': 1.5},
-                    'hoverinfo': 'skip',
-                    'name': 'Stems'
-                })
-                
-                data_traces.append({
-                    'x': x_p_list,
-                    'y': y_p_list,
-                    'type': 'scatter',
-                    'mode': 'markers',
-                    'marker': {'size': 6, 'symbol': 'circle', 'color': '#2E86DE'},
-                    'name': 'Data',
-                    'hovertemplate': f'<b>{x_col}</b>: %{{x}}<br><b>{y_col}</b>: %{{y}}<extra></extra>'
-                })
-            
+            # Stem plot with markers
+            markerline, stemlines, baseline = self.ax.stem(x_plot, y_plot, linefmt=color, markerfmt='o', basefmt=' ')
+            plt.setp(markerline, 'markersize', 4, 'color', color)
+            plt.setp(stemlines, 'linewidth', 1, 'color', color)
+        else:
+            # Line plot with markers
+            if len(x_plot) < 1000:
+                self.ax.plot(x_plot, y_plot, color=color, linewidth=1.5, marker='o', markersize=6)
             else:
-                # HIGH DENSITY: STILL USE STEMS, but move to ScatterGL for performance.
-                try:
-                    full_min = np.nanmin(self.current_y_series) if self.current_y_series is not None else 0
-                    if np.isnan(full_min): full_min = 0
-                    base_y = full_min if full_min < 0 else 0
-                except: base_y = 0
-                
-                stem_x = []
-                stem_y = []
-                # Construct stem geometry
-                for x, y in zip(x_p_list, y_p_list):
-                    if x is not None and y is not None:
-                        stem_x.extend([x, x, None])
-                        stem_y.extend([base_y, y, None])
+                self.ax.plot(x_plot, y_plot, color=color, linewidth=1.0, marker='o', markersize=5)
 
-                data_traces.append({
-                    'x': stem_x,
-                    'y': stem_y,
-                    'type': 'scattergl', # WebGL for Stems
-                    'mode': 'lines',     
-                    'line': {'color': '#2E86DE', 'width': 1}, # Thinner lines for density
-                    'name': 'Stems',
-                    'hoverinfo': 'skip'
-                })
-                
-                data_traces.append({
-                    'x': x_p_list,
-                    'y': y_p_list,
-                    'type': 'scattergl', # WebGL for Markers
-                    'mode': 'markers',     
-                    'marker': {'size': 5, 'symbol': 'circle', 'color': '#2E86DE'},
-                    'name': 'Data',
-                    'hovertemplate': f'<b>{x_col}</b>: %{{x}}<br><b>{y_col}</b>: %{{y}}<extra></extra>'
-                })
-            
-        else:
-            # Standard Line + Markers (View Tab Style)
-            # Use scattergl for performance
-            data_traces.append({
-                'x': x_p_list,
-                'y': y_p_list,
-                'type': 'scattergl',
-                'mode': 'lines+markers' if len(x_p_list) < 5000 else 'lines',
-                'line': {'color': '#2E86DE', 'width': 1.5},
-                'marker': {'size': 4, 'symbol': 'circle', 'color': '#2E86DE'},
-                'name': 'Data',
-                'hovertemplate': f'<b>{x_col}</b>: %{{x}}<br><b>{y_col}</b>: %{{y}}<extra></extra>'
-            })
+        self.ax.set_title(title, fontsize=12, color=self.colors['text'], fontweight='bold')
+        self.ax.set_xlabel(x_col, fontsize=10, color=self.colors['text'])
+        self.ax.set_ylabel(y_col, fontsize=10, color=self.colors['text'])
+        self.ax.grid(True, color=self.colors['grid'], linestyle='-', linewidth=0.5)
+        self.ax.set_facecolor(self.colors['bg'])
         
-        # Add cursor lines and shaded region as SHAPES
-        # Ensure cursor positions are valid for JSON (replace NaN/None with 0 for shapes)
-        def safe_coord(v):
-            if v is None or not np.isfinite(v): return 0.0
-            return float(v)
- 
-        c1 = safe_coord(self.cursor1_pos)
-        c2 = safe_coord(self.cursor2_pos)
-        min_x_cursor = min(c1, c2)
-        max_x_cursor = max(c1, c2)
-        
-        # Initial visibility based on mode
-        cursor_opacity = 0 if self.active_cursor_mode == 'off' else 1
-        fill_opacity = 0 if self.active_cursor_mode == 'off' else 0.2
- 
-        shapes = [
-            # 0: P1 Line
-            {
-                'type': 'line', 'xref': 'x', 'yref': 'paper',
-                'x0': c1, 'y0': 0, 'x1': c1, 'y1': 1,
-                'line': {'color': 'red', 'width': 2, 'dash': 'dash'},
-                'opacity': cursor_opacity
-            },
-            # 1: P2 Line
-            {
-                'type': 'line', 'xref': 'x', 'yref': 'paper',
-                'x0': c2, 'y0': 0, 'x1': c2, 'y1': 1,
-                'line': {'color': 'green', 'width': 2, 'dash': 'dash'},
-                'opacity': cursor_opacity
-            },
-            # 2: Shaded Area
-            {
-                'type': 'rect', 'xref': 'x', 'yref': 'paper',
-                'x0': min_x_cursor, 'y0': 0, 'x1': max_x_cursor, 'y1': 1,
-                'fillcolor': 'rgba(46, 134, 222, 0.2)', 'opacity': fill_opacity, 'line': {'width': 0}, 'layer': 'below'
-            }
-        ]
- 
-        data_json = json.dumps(data_traces)
-        
-        xaxis_config = {
-            'title': {'text': x_col}, 
-            'gridcolor': '#ECF0F1', 
-            'showgrid': True,
-            'rangeslider': {'visible': False}
-        }
-        
+        # Apply log scale BEFORE setting limits
         if self.x_axis_type == 'log':
-            # Log scale requires explicit range in log10 for better stability
-            xaxis_config['type'] = 'log'
-            try:
-                # x_plot is already filtered for > 0 at this point (Global filter)
-                if len(x_plot) > 0:
-                    x_min_val = np.nanmin(x_plot)
-                    x_max_val = np.nanmax(x_plot)
-                    
-                    if x_min_val > 0 and x_max_val > x_min_val:
-                        l_min = np.log10(x_min_val)
-                        l_max = np.log10(x_max_val)
-                        l_span = l_max - l_min
-                        xaxis_config['autorange'] = False
-                        # Set manual range (Plotly Log scale uses log10 units for the 'range' array)
-                        xaxis_config['range'] = [float(l_min - l_span*0.01), float(l_max + l_span*0.01)]
-                    else:
-                         xaxis_config['autorange'] = True
+            self.ax.set_xscale('log')
+            self.ax.xaxis.set_major_formatter(EngFormatter(unit='', sep=''))
+            # For log scale, we need to ensure x values are positive
+            # Filter out any zero or negative values for FFT (skip DC component)
+            if len(x_plot) > 0:
+                positive_mask = x_plot > 0
+                if np.any(positive_mask):
+                    x_min = np.min(x_plot[positive_mask])
+                    x_max = np.max(x_plot[positive_mask])
+                    if x_max > x_min and x_min > 0:
+                        # Set limits with small margin for better visualization
+                        self.ax.set_xlim(x_min * 0.9, x_max * 1.1)
                 else:
-                    xaxis_config['autorange'] = True
-            except:
-                xaxis_config['autorange'] = True
+                    # Fallback if no positive values
+                    self.ax.set_xscale('linear')
         else:
-            xaxis_config['type'] = 'linear'
-            xaxis_config['autorange'] = True
- 
-        layout_json = json.dumps({
-            'title': {'text': title, 'font': {'size': 14, 'color': '#2C3E50'}},
-            'xaxis': xaxis_config,
-            'yaxis': {'title': {'text': y_col}, 'gridcolor': '#ECF0F1', 'showgrid': True},
-            'margin': {'l': 60, 'r': 30, 't': 60, 'b': 60},
-            'plot_bgcolor': 'white',
-            'paper_bgcolor': 'white',
-            'hovermode': 'x',
-            'showlegend': True,
-            'shapes': shapes,
-            'height': None
-        })
- 
-        # Build the HTML
-        template = """
- <!DOCTYPE html>
- <html>
- <head>
-     <meta charset="utf-8" />
-     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
-     <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
-     <style>
-         body, html { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; background: white; user-select: none; }
-         #plot-area { height: 100%; width: 100%; }
-         /* Style to show the cursor is draggable */
-         .cursor-hover { cursor: ew-resize !important; }
-     </style>
-     <script>
-         (function() {
-             try {
-                 var original = CSSStyleSheet.prototype.insertRule;
-                 CSSStyleSheet.prototype.insertRule = function(rule, index) {
-                     try { return original.call(this, rule, index); } catch (e) { return 0; }
-                 };
-             } catch(e) {}
-         })();
-         
-         var bridge;
-         new QWebChannel(qt.webChannelTransport, function(channel) {
-             bridge = channel.objects.bridge;
-         });
- 
-         var activeCursor = null; 
- 
-         function updateCursorsJS(x1, x2) {
-             var plotDiv = document.getElementById('plot-area');
-             if (!plotDiv || !plotDiv._fullLayout) return;
-             var min_x = Math.min(x1, x2);
-             var max_x = Math.max(x1, x2);
-             Plotly.relayout(plotDiv, {
-                 'shapes[0].x0': x1, 'shapes[0].x1': x1,
-                 'shapes[1].x0': x2, 'shapes[1].x1': x2,
-                 'shapes[2].x0': min_x, 'shapes[2].x1': max_x
-             });
-         }
- 
-         function hideCursorsJS(hide) {
-             var plotDiv = document.getElementById('plot-area');
-             if (!plotDiv || !plotDiv._fullLayout) return;
-             var opacity = hide ? 0 : 1;
-             var fillOpacity = hide ? 0 : 0.2;
-             Plotly.relayout(plotDiv, {
-                 'shapes[0].opacity': opacity,
-                 'shapes[1].opacity': opacity,
-                 'shapes[2].opacity': fillOpacity
-             });
-         }
- 
-         window.addEventListener('load', function() {
-             try {
-                 window.onerror = function(msg, url, line) {
-                     if (bridge) bridge.on_error("JS Error: " + msg + " at line " + line);
-                 };
- 
-                 var data = DATA_JSON_PLACEHOLDER;
-                 var layout = LAYOUT_JSON_PLACEHOLDER;
-                 var config = CONFIG_JSON_PLACEHOLDER;
-                 var plotDiv = document.getElementById('plot-area');
-                 
-                 Plotly.newPlot(plotDiv, data, layout, config).then(function() {
-                     if (bridge) bridge.on_ready();
-                 }).catch(function(err) {
-                     if (bridge) bridge.on_error("Plotly Error: " + err.message);
-                 });
-                 
-                 plotDiv.addEventListener('mousedown', function(evt) {
-                     if (evt.button !== 0) return;
-                     var fullLayout = plotDiv._fullLayout;
-                     var xaxis = fullLayout.xaxis;
-                     var rect = plotDiv.getBoundingClientRect();
-                     var xPixel = evt.clientX - rect.left - fullLayout.margin.l;
-                     
-                     var p1Data = plotDiv.layout.shapes[0].x0;
-                     var p2Data = plotDiv.layout.shapes[1].x0;
-                     var p1Pixel = xaxis.c2p(p1Data);
-                     var p2Pixel = xaxis.c2p(p2Data);
-                     
-                     var threshold = 15; // Grab threshold in pixels
-                     if (Math.abs(xPixel - p1Pixel) < threshold) {
-                         activeCursor = 0;
-                         evt.preventDefault();
-                     } else if (Math.abs(xPixel - p2Pixel) < threshold) {
-                         activeCursor = 1;
-                         evt.preventDefault();
-                     } else if (xPixel >= 0 && xPixel <= xaxis._length) {
-                         var xData = xaxis.p2c(xPixel);
-                         if (bridge) bridge.on_click(xData, 0);
-                     }
-                 });
- 
-                 window.addEventListener('mousemove', function(evt) {
-                     var fullLayout = plotDiv._fullLayout;
-                     if (!fullLayout) return;
-                     var xaxis = fullLayout.xaxis;
-                     var rect = plotDiv.getBoundingClientRect();
-                     var xPixel = evt.clientX - rect.left - fullLayout.margin.l;
-                     
-                     if (activeCursor === null) {
-                         // Update mouse cursor style when near a line
-                         var p1Data = plotDiv.layout.shapes[0].x0;
-                         var p2Data = plotDiv.layout.shapes[1].x0;
-                         var p1Pixel = xaxis.c2p(p1Data);
-                         var p2Pixel = xaxis.c2p(p2Data);
-                         
-                         var threshold = 15; // Grab threshold in pixels
-                         if (Math.abs(xPixel - p1Pixel) < threshold || Math.abs(xPixel - p2Pixel) < threshold) {
-                             plotDiv.classList.add('cursor-hover');
-                         } else {
-                             plotDiv.classList.remove('cursor-hover');
-                         }
-                         return;
-                     }
-                     
-                     xPixel = Math.max(0, Math.min(xPixel, xaxis._length));
-                     var xData = xaxis.p2c(xPixel);
-                     
-                     var x1 = activeCursor === 0 ? xData : plotDiv.layout.shapes[0].x0;
-                     var x2 = activeCursor === 1 ? xData : plotDiv.layout.shapes[1].x0;
-                     var min_x = Math.min(x1, x2);
-                     var max_x = Math.max(x1, x2);
-                     
-                     var update = {};
-                     update['shapes['+activeCursor+'].x0'] = xData;
-                     update['shapes['+activeCursor+'].x1'] = xData;
-                     update['shapes[2].x0'] = min_x;
-                     update['shapes[2].x1'] = max_x;
-                     
-                     Plotly.relayout(plotDiv, update);
-                     if (bridge) bridge.on_move(x1, x2);
-                 });
- 
-                 window.addEventListener('mouseup', function() { 
-                     activeCursor = null; 
-                 });
-                 
-                 window.addEventListener('resize', function() { Plotly.Plots.resize(plotDiv); });
-             } catch(e) { console.error(e); }
-         });
-     </script>
- </head>
- <body><div id="plot-area"></div></body>
- </html>
- """
-        html = template.replace("DATA_JSON_PLACEHOLDER", data_json)\
-                       .replace("LAYOUT_JSON_PLACEHOLDER", layout_json)\
-                       .replace("CONFIG_JSON_PLACEHOLDER", json.dumps(config))
-                       
-        # Inject a timestamp comment to force QWebEngine to treat it as new content
-        import time
-        html += f"<!-- force_refresh: {time.time()} -->"
- 
-        # logging.debug(f"setHtml called. Content size: {len(html)/1024:.1f} KB")
-        self.plot_view.setHtml(html)
+            # Linear scale - set limits tightly to data range
+            if len(x_plot) > 0:
+                x_min, x_max = x_plot[0], x_plot[-1]
+                # Add small margin for better visualization
+                margin = (x_max - x_min) * 0.02 if x_max > x_min else 0.1
+                self.ax.set_xlim(x_min - margin, x_max + margin)
         
-        # Save data for fast stats calculation
-        self.current_x_series = x_data
-        self.current_y_series = y_data
-        
+        # Auto-scale Y-axis to fit the data with margins
+        if len(y_plot) > 0:
+            y_finite = y_plot[np.isfinite(y_plot)]
+            if len(y_finite) > 0:
+                y_min = np.min(y_finite)
+                y_max = np.max(y_finite)
+                
+                # Add 10% margin on each side for better visualization
+                if y_max > y_min:
+                    y_range = y_max - y_min
+                    margin = y_range * 0.1
+                    self.ax.set_ylim(y_min - margin, y_max + margin)
+                elif y_max == y_min and y_max != 0:
+                    # If all values are the same, center around that value
+                    self.ax.set_ylim(y_max * 0.9, y_max * 1.1)
+                else:
+                    # Fallback for zero values
+                    self.ax.set_ylim(-0.1, 0.1)
+            
+        self.sync_cursor_visuals()
+        self.canvas.draw()
         self.update_statistics_only()
 
-    def move_cursors_js(self):
-        """Update cursor positions in JS without reloading the whole page."""
-        if self.cursor1_pos is None or self.cursor2_pos is None:
+    def sync_cursor_visuals(self):
+        """Update the visual positions of cursor artists on the canvas."""
+        if self.cursor1_pos is not None:
+            self.line_p1.set_xdata([self.cursor1_pos, self.cursor1_pos])
+        if self.cursor2_pos is not None:
+            self.line_p2.set_xdata([self.cursor2_pos, self.cursor2_pos])
+        if self.cursor1_pos is not None and self.cursor2_pos is not None:
+            c_min, c_max = sorted([self.cursor1_pos, self.cursor2_pos])
+            
+            # Robust update for both Rectangle (modern/specific Matplotlib) and Polygon (standard)
+            # axvspan usually creates a Polygon, but can return Rectangle in some versions
+            if hasattr(self.region_fill, 'set_width'):
+                 # It's a Rectangle
+                 self.region_fill.set_x(c_min)
+                 self.region_fill.set_width(c_max - c_min)
+            else:
+                 # It's a Polygon
+                self.region_fill.set_xy([
+                    [c_min, 0], [c_min, 1],
+                    [c_max, 1], [c_max, 0],
+                    [c_min, 0]
+                ])
+
+    def on_click(self, event):
+        """Handle mouse button press for cursor interaction."""
+        if event.inaxes != self.ax:
+            return
+        
+        if self.active_cursor_mode == 'off':
             return
             
-        js = f"updateCursorsJS({self.cursor1_pos}, {self.cursor2_pos});"
-        self.plot_view.page().runJavaScript(js)
-        self.update_statistics_only()
+        # Check if we clicked near a cursor
+        # Use display coordinates for better picking
+        try:
+            # Convert cursor positions to display coordinates
+            p1_disp = self.ax.transData.transform((self.cursor1_pos, 0))[0]
+            p2_disp = self.ax.transData.transform((self.cursor2_pos, 0))[0]
+            click_disp = event.x
+            
+            threshold = self.cursor_pick_threshold # pixels
+            
+            dist1 = abs(click_disp - p1_disp)
+            dist2 = abs(click_disp - p2_disp)
+            
+            if dist1 < threshold and dist1 < dist2:
+                self.dragging_cursor = 0
+            elif dist2 < threshold:
+                self.dragging_cursor = 1
+            else:
+                # If not dragging, maybe move a cursor to click position if in p1/p2 mode
+                if self.active_cursor_mode == 'p1':
+                    self.cursor1_pos = event.xdata
+                    self.dragging_cursor = 0
+                elif self.active_cursor_mode == 'p2':
+                    self.cursor2_pos = event.xdata
+                    self.dragging_cursor = 1
+                elif self.active_cursor_mode == 'auto':
+                    # Move the nearest one
+                    if dist1 < dist2:
+                        self.cursor1_pos = event.xdata
+                        self.dragging_cursor = 0
+                    else:
+                        self.cursor2_pos = event.xdata
+                        self.dragging_cursor = 1
+            
+            if self.dragging_cursor is not None:
+                self.sync_cursor_visuals()
+                self.canvas.draw_idle()
+                self.update_statistics_only()
+                self.cursorsMoved.emit(self.cursor1_pos, self.cursor2_pos)
+        except:
+            pass
+
+    def on_mouse_move(self, event):
+        """Handle mouse movement for dragging cursors."""
+        if self.active_cursor_mode == 'off':
+            return
+            
+        if self.dragging_cursor is not None and event.inaxes == self.ax:
+            if self.dragging_cursor == 0:
+                self.cursor1_pos = event.xdata
+            else:
+                self.cursor2_pos = event.xdata
+                
+            self.sync_cursor_visuals()
+            self.canvas.draw_idle()
+            self.update_statistics_only()
+            self.cursorsMoved.emit(self.cursor1_pos, self.cursor2_pos)
+            
+        # Update cursor icon
+        if event.inaxes == self.ax:
+            try:
+                p1_disp = self.ax.transData.transform((self.cursor1_pos, 0))[0]
+                p2_disp = self.ax.transData.transform((self.cursor2_pos, 0))[0]
+                if abs(event.x - p1_disp) < 15 or abs(event.x - p2_disp) < 15:
+                    self.setCursor(Qt.SizeHorCursor)
+                else:
+                    self.setCursor(Qt.ArrowCursor)
+            except:
+                self.setCursor(Qt.ArrowCursor)
+
+    def on_release(self, event):
+        """Handle mouse button release."""
+        self.dragging_cursor = None
 
     def update_statistics_only(self):
         """Update only the statistics labels."""
@@ -1116,16 +734,7 @@ class PlotWidget(QWidget):
             self.update_statistics(self.current_x_series, self.current_y_series)
     
     def update_statistics(self, x_data: np.ndarray, y_data: np.ndarray):
-        """
-        Calculate and update statistics between cursors (or full dataset).
-        
-        Parameters
-        ----------
-        x_data : np.ndarray
-            X data.
-        y_data : np.ndarray
-            Y data.
-        """
+        """Calculate and update statistics between cursors."""
         if self.active_cursor_mode == 'off':
             y_selected = y_data
         else:
@@ -1134,18 +743,9 @@ class PlotWidget(QWidget):
             try:
                 min_x = min(self.cursor1_pos, self.cursor2_pos)
                 max_x = max(self.cursor1_pos, self.cursor2_pos)
-                # Use a small epsilon for robust float comparison
-                epsilon = 1e-12
-                mask = (x_data >= min_x - epsilon) & (x_data <= max_x + epsilon)
+                mask = (x_data >= min_x) & (x_data <= max_x)
                 y_selected = y_data[mask]
-                
-                # Diagnostic logging
-                # logging.debug(f"Stats range [{min_x:.4g}, {max_x:.4g}], Points in range: {len(y_selected)}/{len(y_data)}")
-                if len(y_selected) > 0:
-                    pass
-                    # logging.debug(f"Calculated Max: {np.nanmax(y_selected):.6g}, Min: {np.nanmin(y_selected):.6g}")
-            except Exception as e:
-                logging.error(f"Error filtering stats data: {e}")
+            except:
                 return
         
         try:
@@ -1155,8 +755,6 @@ class PlotWidget(QWidget):
                 return
                 
             stats = math_utils.calculate_statistics(y_selected)
-            
-            # Update labels
             for name, value in stats.items():
                 if name in self.stats_labels:
                     label = self.stats_labels[name]
@@ -1175,32 +773,23 @@ class PlotWidget(QWidget):
             return
         
         filename, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export to CSV",
-            "",
-            "CSV Files (*.csv);;All Files (*)"
+            self, "Export to CSV", "", "CSV Files (*.csv);;All Files (*)"
         )
         
         if not filename:
             return
         
         try:
-            # Determine which rows to export
             if self.active_cursor_mode != 'off' and self.cursor1_pos is not None and self.cursor2_pos is not None:
-                # Use current X axis to define the range
                 x_col = self.x_axis_combo.currentText()
                 x_data = self.get_column_data(x_col)
-                
                 min_x = min(self.cursor1_pos, self.cursor2_pos)
                 max_x = max(self.cursor1_pos, self.cursor2_pos)
                 mask = (x_data >= min_x) & (x_data <= max_x)
-                
                 export_data = self.data[mask]
             else:
-                # Export everything
                 export_data = self.data
             
-            # Create DataFrame
             if export_data.dtype.names:
                 df = pd.DataFrame(export_data)
             else:
@@ -1210,22 +799,12 @@ class PlotWidget(QWidget):
                     df = pd.DataFrame(export_data, columns=self.columns)
             
             df.to_csv(filename, index=False)
-            logging.info(f"Data exported to {filename} ({len(df)} rows)")
             QMessageBox.information(self, "Export Success", f"Successfully exported {len(df)} rows to:\n{filename}")
-            
         except Exception as e:
-            logging.error(f"Error exporting CSV: {str(e)}")
             QMessageBox.critical(self, "Export Error", f"Failed to export CSV:\n{str(e)}")
     
     def clear_plot(self, message: str = ""):
-        """
-        Clear the current plot with an optional message.
-        
-        Parameters
-        ----------
-        message : str, optional
-            Message to display, by default "".
-        """
+        """Clear the current plot."""
         self.data = None
         self.columns = []
         self.cursor1_pos = None
@@ -1235,15 +814,17 @@ class PlotWidget(QWidget):
         self.y_axis_combo.clear()
         self.x_axis_combo.blockSignals(False)
         
-        # Clear the plot view with an optional message
+        self.ax.clear()
         if message:
-            content = f"<div style='display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif; color:#666;'><h3>{message}</h3></div>"
-        else:
-            content = ""
-            
-        self.plot_view.setHtml(content)
+            self.ax.text(0.5, 0.5, message, transform=self.ax.transAxes, ha='center', va='center', color='#666')
+        self.canvas.draw()
         
         for label in self.stats_labels.values():
             label.setText("---")
-        
         self.export_btn.setEnabled(False)
+
+    def move_cursors_js(self):
+        """No longer used, maintained for interface compatibility if needed."""
+        self.sync_cursor_visuals()
+        self.canvas.draw_idle()
+        self.update_statistics_only()

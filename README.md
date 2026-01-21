@@ -5,12 +5,16 @@
 
   [![Python](https://img.shields.io/badge/Python-3.10-blue?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
   [![PyQt5](https://img.shields.io/badge/PyQt-5-green?style=for-the-badge&logo=qt&logoColor=white)](https://pypi.org/project/PyQt5/)
-  [![Plotly](https://img.shields.io/badge/Plotly-Interactive-informational?style=for-the-badge&logo=plotly&logoColor=white)](https://plotly.com/python/)
+  [![Matplotlib](https://img.shields.io/badge/Matplotlib-Interactive-blue?style=for-the-badge&logo=matplotlib&logoColor=white)](https://matplotlib.org/)
   [![License](https://img.shields.io/badge/License-GPLv3-yellow?style=for-the-badge)](LICENSE)
 
   **A Python-based desktop tool for visualizing, analyzing, and editing HDF5 files.**
 
 </div>
+
+---
+
+![H5Inspector Demo](assets/gui.gif)
 
 ---
 
@@ -21,16 +25,17 @@ It provides an intuitive interface for navigating large datasets, visualizing si
 
 ---
 
+
 ## Features
 
 ### 📊 View (View Tab)
 - **Hierarchical Navigation**: Browse groups, datasets, and attributes using a tree view.
 - **Data Tables**: Inspect raw values from 1D and 2D datasets.
 - **Interactive Plots**:
-  - **Plotly (WebGL) engine**
-  - Zoom, pan, and auto-scaling
+  - **Matplotlib engine**
+  - Zoom, pan, Range and auto-scaling
   - **Dual Cursors**: Measurements with statistics (Mean, RMS, Pk-Pk, Std Dev)
-  - **Markers**: Precise visualization of individual data points
+  - **Automatic Measurements**: RMS, Std Dev, Mean, Max, Min, Peak to Peak
 
 ---
 
@@ -49,7 +54,7 @@ It provides an intuitive interface for navigating large datasets, visualizing si
 ### ✏️ Edit and Export (Edit Tab)
 - **File Creation**: Export selected datasets or ranges to new HDF5 files.
 - **Metadata Editing**: Add comments and attributes to exported files.
-- **CSV Export**: Export data to CSV format compatible with Excel and MATLAB.
+- **CSV Export**: Export data to CSV format .
 
 ---
 
@@ -71,7 +76,6 @@ It provides an intuitive interface for navigating large datasets, visualizing si
 2. **Create a virtual environment (optional but recommended)**
    ```bash
    python -m venv venv
-   source venv/bin/activate   # Linux / macOS
    venv\Scripts\activate      # Windows
    ```
 
@@ -104,13 +108,13 @@ python main.py
 
 ```
 H5Inspector/
-├── h5inspector.py           # Main application logic
+├── h5inspector.py           # Main application
 ├── main.py                  # Entry point
 ├── view_tab.py              # Visualization module
 ├── analysis_tab.py          # FFT analysis module
 ├── edit_tab.py              # Edit and export module
-├── plot_widget.py           # Plot widget (Plotly + WebEngine)
-├── h5_utils.py              # Low-level HDF5 utilities
+├── plot_widget.py           # Plot widget (Matplotlib + Interactive Cursors)
+├── h5_utils.py              # HDF5 utilities
 ├── math_utils.py            # Mathematical algorithms (FFT, THD)
 ├── styles.qss               # Application theme (Qt Style Sheet)
 └── requirements.txt         # Python dependencies

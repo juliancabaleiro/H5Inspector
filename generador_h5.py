@@ -11,13 +11,13 @@ import h5py
 from datetime import datetime
 
 #general configuration
-name = r"signals_axes_vs_matrix.h5"
+name = r"signals_axes_vs_matrix-big.h5"
 fs = 1_000_000          # Hz
 f1 = 50                 # Hz
 f2 = 1000               # Hz
 A1 = 1.0
 A2 = 0.3
-periods = 2
+periods = 150
 
 T = periods / f1        # duración total
 N = int(fs * T)

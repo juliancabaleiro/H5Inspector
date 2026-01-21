@@ -78,6 +78,7 @@ class AnalysisTab(QWidget):
         
         # Log-X
         self.log_x_check = QCheckBox("Logarithmic Scale (X)")
+        self.log_x_check.setChecked(True)
         self.log_x_check.stateChanged.connect(self.update_fft_plot)
         controls_layout.addWidget(self.log_x_check)
         
@@ -136,7 +137,9 @@ class AnalysisTab(QWidget):
         analysis_layout.addWidget(plot_container)
         
         main_splitter.addWidget(analysis_area)
-        main_splitter.setSizes([250, 750])
+        main_splitter.setSizes([900, 700])
+        main_splitter.setStretchFactor(0, 0)
+        main_splitter.setStretchFactor(1, 1)
         
         layout.addWidget(main_splitter)
         
@@ -218,7 +221,9 @@ class AnalysisTab(QWidget):
                     self.signal_source_combo.addItem("Signal (1D)", 0)
                 elif len(shape) == 2:
                     # Try to get labels
-                    data_temp, columns = h5_utils.get_dataset_data(self.current_file, self.last_selected_dataset)
+                    result = h5_utils.get_dataset_data(self.current_file, self.last_selected_dataset)
+                    data_temp = result[0]
+                    columns = result[1]
                     for i, col in enumerate(columns):
                         self.signal_source_combo.addItem(col, i)
         finally:
@@ -283,7 +288,9 @@ class AnalysisTab(QWidget):
                 fs = 1e3
                 
                 
-            data, columns = h5_utils.get_dataset_data(self.current_file, self.last_selected_dataset)
+            result = h5_utils.get_dataset_data(self.current_file, self.last_selected_dataset)
+            data = result[0]
+            columns = result[1]
             
             # Select column based on combo
             col_idx = self.signal_source_combo.currentData()
@@ -314,23 +321,38 @@ class AnalysisTab(QWidget):
             
             # Determine X data and labels
             x_mode = self.x_axis_mode_combo.currentText()
+            is_log = self.log_x_check.isChecked()
+            
             if x_mode == "Index":
                 x_data = np.arange(len(magnitude))
                 x_label = "Index"
             else:
-                x_data = freqs / 1e3 # kHz
-                x_label = "Frequency (kHz)"
+                if is_log:
+                    x_data = freqs # Hz
+                    x_label = "Frequency (Hz)"
+                else:
+                    x_data = freqs / 1e3 # kHz
+                    x_label = "Frequency (kHz)"
             
             # Plot FFT
             fft_data = np.column_stack((x_data, magnitude, mag_db, phase))
             
+            # Debug logging to diagnose zero values
+            logging.info(f"FFT Debug - Signal length: {len(self.current_signal)}")
+            logging.info(f"FFT Debug - Magnitude range: [{np.min(magnitude):.6e}, {np.max(magnitude):.6e}]")
+            logging.info(f"FFT Debug - Non-zero magnitude count: {np.count_nonzero(magnitude)}/{len(magnitude)}")
+            logging.info(f"FFT Debug - Freq range: [{np.min(freqs):.6e}, {np.max(freqs):.6e}] Hz")
+            
             # Determine X-axis type (linear or log)
             x_scale = 'log' if self.log_x_check.isChecked() else 'linear'
             
-            # Reset Plot Range to 50% for new FFT calculation
+            # Reset Plot Range to 100% for new FFT calculation
             if hasattr(self.fft_plot, 'end_input'):
+                self.fft_plot.start_input.blockSignals(True)
+                self.fft_plot.start_input.setText("0")
+                self.fft_plot.start_input.blockSignals(False)
                 self.fft_plot.end_input.blockSignals(True)
-                self.fft_plot.end_input.setText("50")
+                self.fft_plot.end_input.setText("100")
                 self.fft_plot.end_input.blockSignals(False)
             
             self.fft_plot.set_data(
@@ -351,22 +373,13 @@ class AnalysisTab(QWidget):
             self.update_fft_parameters()
             
         except Exception as e:
-            logging.error(f"Error calculating FFT: {e}")
+            import traceback
+            logging.error(f"Error calculating FFT: {e}\n{traceback.format_exc()}")
             self.fft_plot.clear_plot(f"FFT Error: {str(e)}")
 
     def update_fft_parameters(self, c1=None, c2=None):
         """
         Update Peak Frequency, Magnitude and THD labels.
-
-        Calculates peak and THD based on the selected frequency range (if cursors
-        are active) or the specified visual range, using the cached FFT results.
-
-        Parameters
-        ----------
-        c1 : float, optional
-            Position of cursor 1, by default None (uses current widget value).
-        c2 : float, optional
-            Position of cursor 2, by default None (uses current widget value).
         """
         if not hasattr(self, 'cached_fft_results') or self.cached_fft_results is None:
             return
@@ -384,52 +397,48 @@ class AnalysisTab(QWidget):
             
             use_subrange = cursors_active
             
+            # Default to full range search if no cursors
+            f_min_idx = 0
+            f_max_idx = len(freqs) - 1
+            
             if cursors_active:
-                # Determine X vector for masking from cursors
                 if x_mode == "Index":
-                    x_vec = np.arange(len(magnitude))
-                    f_min, f_max = min(c1, c2), max(c1, c2)
+                    c_start, c_end = min(c1, c2), max(c1, c2)
+                    f_min_idx = int(max(0, min(c_start, len(freqs)-1)))
+                    f_max_idx = int(max(0, min(c_end, len(freqs)-1)))
                 else:
-                    x_vec = freqs
-                    f_min = min(c1, c2) * 1e3 # Convert kHz back to Hz
-                    f_max = max(c1, c2) * 1e3
-            else:
-                # Fallback to visual range if it's not the full 100%
-                try:
-                    e_pct = float(self.fft_plot.end_input.text().replace('%', '') or 100)
-                    if e_pct < 99.99:
-                        use_subrange = True
-                        if x_mode == "Index":
-                            x_vec = np.arange(len(magnitude))
-                            f_min = 0
-                            f_max = (e_pct / 100.0) * len(magnitude)
-                        else:
-                            x_vec = freqs
-                            f_min = 0
-                            f_max = (e_pct / 100.0) * freqs[-1]
-                    else:
-                        use_subrange = False
-                except:
-                    use_subrange = False
-
-            if use_subrange:
-                mask = (x_vec >= f_min) & (x_vec <= f_max)
-                
-                if np.any(mask):
-                    sel_freqs = freqs[mask]
-                    sel_mag = magnitude[mask]
-                    peak_f, peak_m = math_utils.find_peak(sel_freqs, sel_mag)
+                    # Map cursor back to index
+                    # If log scale, cursors are in Hz, else kHz
+                    is_log = self.log_x_check.isChecked()
+                    c_start_hz = min(c1, c2) if is_log else min(c1, c2) * 1e3
+                    c_end_hz = max(c1, c2) if is_log else max(c1, c2) * 1e3
                     
-                    # Recalculate THD with this peak as fundamental
-                    # Use FULL arrays to ensure harmonics outside the cursor range are included
-                    current_thd = math_utils.calculate_thd(magnitude, freqs, fundamental_freq=peak_f)
-                else:
-                    peak_f, peak_m = 0, 0
-                    current_thd = 0.0
+                    # Find indices (approx)
+                    # searchsorted is robust
+                    f_min_idx = np.searchsorted(freqs, c_start_hz)
+                    f_max_idx = np.searchsorted(freqs, c_end_hz)
+                    if f_max_idx >= len(freqs): f_max_idx = len(freqs) - 1
+            
+            if f_min_idx >= f_max_idx:
+                f_max_idx = f_min_idx
+
+            # Find peak in the selected range
+            # IMPT: meaningful peak search should skip DC (index 0) unless strictly zooming at 0
+            search_start = f_min_idx
+            if search_start == 0 and len(magnitude) > 1:
+                search_start = 1
+                
+            if search_start <= f_max_idx:
+                sub_mag = magnitude[search_start:f_max_idx+1]
+                sub_freqs = freqs[search_start:f_max_idx+1]
+                
+                peak_f, peak_m = math_utils.find_peak(sub_freqs, sub_mag)
+                
+                # Recalculate THD with this peak as fundamental
+                current_thd = math_utils.calculate_thd(magnitude, freqs, fundamental_freq=peak_f)
             else:
-                # No cursors - use full spectrum
-                peak_f, peak_m = math_utils.find_peak(freqs, magnitude)
-                current_thd = thd # Default full spectrum THD
+                peak_f, peak_m = 0.0, 0.0
+                current_thd = 0.0
 
             # Update labels
             if x_mode == "Index":
@@ -437,7 +446,10 @@ class AnalysisTab(QWidget):
                 peak_idx = np.argmin(np.abs(freqs - peak_f))
                 self.peak_freq_val.setText(f"Idx: {peak_idx}")
             else:
-                self.peak_freq_val.setText(f"{peak_f/1e3:.4f} kHz")
+                if self.log_x_check.isChecked():
+                    self.peak_freq_val.setText(f"{peak_f:.2f} Hz")
+                else:
+                    self.peak_freq_val.setText(f"{peak_f/1e3:.4f} kHz")
             self.peak_mag_val.setText(f"{peak_m:.4g}")
             self.thd_val.setText(f"{current_thd:.2f} %")
             
