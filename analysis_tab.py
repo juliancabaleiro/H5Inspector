@@ -97,16 +97,19 @@ class AnalysisTab(QWidget):
         params_layout.addWidget(QLabel("Peak Frequency:"), 0, 0)
         self.peak_freq_val = QLabel("---")
         self.peak_freq_val.setStyleSheet("font-weight: bold; color: #d63031;")
+        self.peak_freq_val.setTextInteractionFlags(Qt.TextSelectableByMouse)
         params_layout.addWidget(self.peak_freq_val, 0, 1)
         
         params_layout.addWidget(QLabel("Peak Magnitude:"), 0, 2)
         self.peak_mag_val = QLabel("---")
         self.peak_mag_val.setStyleSheet("font-weight: bold; color: #d63031;")
+        self.peak_mag_val.setTextInteractionFlags(Qt.TextSelectableByMouse)
         params_layout.addWidget(self.peak_mag_val, 0, 3)
 
         params_layout.addWidget(QLabel("THD (%):"), 1, 0)
         self.thd_val = QLabel("---")
         self.thd_val.setStyleSheet("font-weight: bold; color: #0984e3;")
+        self.thd_val.setTextInteractionFlags(Qt.TextSelectableByMouse)
         params_layout.addWidget(self.thd_val, 1, 1)
         
         self.params_group.setLayout(params_layout)
@@ -337,23 +340,8 @@ class AnalysisTab(QWidget):
             # Plot FFT
             fft_data = np.column_stack((x_data, magnitude, mag_db, phase))
             
-            # Debug logging to diagnose zero values
-            logging.info(f"FFT Debug - Signal length: {len(self.current_signal)}")
-            logging.info(f"FFT Debug - Magnitude range: [{np.min(magnitude):.6e}, {np.max(magnitude):.6e}]")
-            logging.info(f"FFT Debug - Non-zero magnitude count: {np.count_nonzero(magnitude)}/{len(magnitude)}")
-            logging.info(f"FFT Debug - Freq range: [{np.min(freqs):.6e}, {np.max(freqs):.6e}] Hz")
-            
             # Determine X-axis type (linear or log)
             x_scale = 'log' if self.log_x_check.isChecked() else 'linear'
-            
-            # Reset Plot Range to 100% for new FFT calculation
-            if hasattr(self.fft_plot, 'end_input'):
-                self.fft_plot.start_input.blockSignals(True)
-                self.fft_plot.start_input.setText("0")
-                self.fft_plot.start_input.blockSignals(False)
-                self.fft_plot.end_input.blockSignals(True)
-                self.fft_plot.end_input.setText("100")
-                self.fft_plot.end_input.blockSignals(False)
             
             self.fft_plot.set_data(
                 fft_data, 

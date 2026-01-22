@@ -111,13 +111,13 @@ class PlotWidget(QWidget):
         # Plot Range Percentage
         self.range_label = QLabel("Range (%):")
         self.start_input = QLineEdit("0")
-        self.start_input.setFixedWidth(50)
+        self.start_input.setFixedWidth(65)
         self.start_input.setToolTip("Start %")
         self.start_input.textChanged.connect(self.validate_range_ui)
         self.start_input.returnPressed.connect(self.update_plot)
         
         self.end_input = QLineEdit("100")
-        self.end_input.setFixedWidth(50)
+        self.end_input.setFixedWidth(65)
         self.end_input.setToolTip("End %")
         self.end_input.textChanged.connect(self.validate_range_ui)
         self.end_input.returnPressed.connect(self.update_plot)
@@ -261,6 +261,7 @@ class PlotWidget(QWidget):
             stats_layout.addWidget(QLabel(f"{name}:"), row, col)
             label = QLabel("---")
             label.setStyleSheet("font-weight: bold; color: #2C3E50;")
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             stats_layout.addWidget(label, row, col + 1)
             self.stats_labels[name] = label
             col += 2
@@ -458,12 +459,17 @@ class PlotWidget(QWidget):
     
     def auto_calc_limit(self, total_points: int):
         """Auto-calculate start/end % to keep points within a safe limit."""
-        if self.plot_style == 'stem':
-            return
-        
-        # Set Full Range by default as requested
-        self.start_input.setText("0")
-        self.end_input.setText("100")
+        target_points = 50000
+        if total_points > target_points:
+            pct = (target_points / total_points) * 100.0
+            # Ensure at least a small percentage is shown but capped at 100
+            pct = max(0.01, min(100.0, pct))
+            self.start_input.setText("0")
+            self.end_input.setText(f"{pct:.2f}")
+        else:
+            # Set Full Range by default if within limit
+            self.start_input.setText("0")
+            self.end_input.setText("100")
 
     def update_plot(self):
         """Redraw the plot with current axis and data."""
@@ -538,11 +544,25 @@ class PlotWidget(QWidget):
         x_plot = x_data[idx_start:idx_end]
         y_plot = y_data[idx_start:idx_end]
 
+        # Downsampling logic if requested range still has too many points
+        target_max_points = 55000 # Slightly more than 50k to allow some margin
+        current_points = len(x_plot)
+        downsampled = False
+        if current_points > target_max_points:
+            stride = current_points // 50000
+            if stride > 1:
+                x_plot = x_plot[::stride]
+                y_plot = y_plot[::stride]
+                downsampled = True
+
         self.rangeChanged.emit()
         
         title = self.dataset_name or f"{y_col} vs {x_col}"
         if start_pct > 0 or end_pct < 100:
             title += f" (Range: {start_pct:.2f}% - {end_pct:.2f}%)"
+        
+        if downsampled:
+            title += f" [Downsampled 1:{stride}]"
             
         # Clear main artists but keep our cursors
         self.ax.clear()

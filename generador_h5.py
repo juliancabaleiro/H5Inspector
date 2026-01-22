@@ -84,4 +84,4 @@ with h5py.File(name, "w") as f:
     f.attrs["author"] = "Python HDF5 generator"
     f.attrs["note"] = "Comparison between separate axis datasets and matrix dataset"
 
-print("Archivo signals_axes_vs_matrix.h5 creado correctamente")
+print("signals_axes_vs_matrix.h5 file created successfully")
