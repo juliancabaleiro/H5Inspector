@@ -87,6 +87,18 @@ class H5Inspector(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready. Load an HDF5 file to start.")
     
+    def get_resource_path(self, relative_path):
+        """
+        Get absolute path to resource, works for dev and for PyInstaller.
+        """
+        try:
+            # PyInstaller creates a temp folder and stores path in _MEIPASS
+            base_path = sys._MEIPASS
+        except Exception:
+            base_path = os.path.abspath(".")
+
+        return os.path.join(base_path, relative_path)
+
     def load_stylesheet(self):
         """
         Load and apply the custom stylesheet from 'styles.qss'.
@@ -96,14 +108,19 @@ class H5Inspector(QMainWindow):
         - Logs a warning or error if the file cannot be loaded.
         """
         try:
-            # Get the directory of the current script
-            script_dir = os.path.dirname(os.path.abspath(__file__))
+            # First try the directory of the script/executable
+            script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
             qss_path = os.path.join(script_dir, 'styles.qss')
+            
+            # If not found there, try the bundled resource path (if using PyInstaller)
+            if not os.path.exists(qss_path):
+                qss_path = self.get_resource_path('styles.qss')
             
             if os.path.exists(qss_path):
                 with open(qss_path, 'r', encoding='utf-8') as f:
                     stylesheet = f.read()
                     self.setStyleSheet(stylesheet)
+                logging.info(f"Stylesheet loaded from {qss_path}")
             else:
                 logging.warning(f"Stylesheet not found at {qss_path}")
         except Exception as e:

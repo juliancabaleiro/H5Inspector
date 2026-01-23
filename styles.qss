@@ -13,7 +13,7 @@
 
 /* Main Window */
 QMainWindow {
-    background-color: #f8f9fa;
+    background-color: #ffffff;
 }
 
 /* Tab Widget */
@@ -71,11 +71,13 @@ QPushButton:disabled {
 }
 
 QPushButton#secondaryButton {
-    background-color: #6c757d;
+    background-color: #f8f9fa;
+    color: #212529;
+    border: 1px solid #ced4da;
 }
 
 QPushButton#secondaryButton:hover {
-    background-color: #545b62;
+    background-color: #e2e6ea;
 }
 
 QPushButton#successButton {

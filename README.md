@@ -57,6 +57,15 @@ It provides an intuitive interface for navigating large datasets, visualizing si
 - **CSV Export**: Export data to CSV format .
 
 ---
+## Windows executable
+
+A prebuilt Windows executable is available in the **Releases** section.
+
+- Windows 10 / 11 (64-bit)
+- No Python installation required
+
+
+---
 
 ## 🛠 Installation
 
@@ -88,7 +97,7 @@ It provides an intuitive interface for navigating large datasets, visualizing si
 
 ## 💻 Usage
 
-Run the main application:
+Run the main application executable or from sourcode:
 
 ```bash
 python main.py
