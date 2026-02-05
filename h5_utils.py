@@ -238,9 +238,10 @@ def get_dataset_info(filepath: str, dataset_path: str) -> Dict[str, Any]:
 
 
 def copy_h5_items(source_filepath: str, dest_filepath: str, 
-                  items_to_copy: List[str], file_comment: str = "") -> bool:
+                  items_to_copy: List[str], file_comment: str = "",
+                  compression: str = "gzip") -> bool:
     """
-    Copy selected groups/datasets/attributes to a new HDF5 file.
+    Copy selected groups/datasets/attributes to a new HDF5 file with compression.
     
     Parameters
     ----------
@@ -252,6 +253,8 @@ def copy_h5_items(source_filepath: str, dest_filepath: str,
         List of absolute paths within the source file to copy.
     file_comment : str, optional
         Comment to add to the new file's attributes.
+    compression : str, optional
+        Compression algorithm to use (e.g., 'gzip'), by default 'gzip'.
         
     Returns
     -------
@@ -265,9 +268,47 @@ def copy_h5_items(source_filepath: str, dest_filepath: str,
         logging.error(f"Error: Source and destination are the same file: {source_filepath}")
         return False
 
+    def recursive_copy(src_item, dst_parent, name, compression_algo):
+        """Helper to recursively copy items with compression for datasets."""
+        if isinstance(src_item, h5py.Dataset):
+            # Create dataset with compression
+            # Specification of compression automatically enables chunking
+            try:
+                # Use [()] or [:] to read all data. For very large datasets, this might be memory intensive.
+                # However, this matches the current application's data handling patterns.
+                data = src_item[()]
+                
+                # Create the dataset in the destination
+                # If compression is requested but data is scalar or empty, create_dataset handles it
+                if compression_algo and data.shape != ():
+                    ds = dst_parent.create_dataset(name, data=data, compression=compression_algo, shuffle=True)
+                else:
+                    ds = dst_parent.create_dataset(name, data=data)
+                
+                # Copy attributes
+                for k, v in src_item.attrs.items():
+                    ds.attrs[k] = v
+            except Exception as e:
+                logging.warning(f"Could not compress dataset {name}, falling back to standard copy: {e}")
+                src_item.file.copy(src_item.name, dst_parent, name=name)
+        
+        elif isinstance(src_item, h5py.Group):
+            # Create the group
+            if name not in dst_parent:
+                group = dst_parent.create_group(name)
+            else:
+                group = dst_parent[name]
+                
+            # Copy attributes
+            for k, v in src_item.attrs.items():
+                group.attrs[k] = v
+                
+            # Copy all children recursively
+            for child_name in src_item:
+                recursive_copy(src_item[child_name], group, child_name, compression_algo)
+
     try:
         # Sort items by path length to process parents before children if possible
-        # although Group.copy is recursive, so we should filter redundant children.
         sorted_items = sorted(items_to_copy, key=len)
         
         # Filter redundant items (e.g. if /A is copied, don't copy /A/B separately)
@@ -294,16 +335,24 @@ def copy_h5_items(source_filepath: str, dest_filepath: str,
                     if item_path in src:
                         # Ensure path starts with /
                         full_path = item_path if item_path.startswith('/') else '/' + item_path
+                        parts = [p for p in full_path.split('/') if p]
                         
-                        # Create parent hierarchy if needed
-                        parts = full_path.split('/')
-                        if len(parts) > 2:
-                            parent_path = '/'.join(parts[:-1])
-                            dst.require_group(parent_path)
+                        if not parts:
+                            # Root attributes copy if root was selected
+                            for k, v in src.attrs.items():
+                                dst.attrs[k] = v
+                            continue
+                            
+                        # Navigate/Create parent hierarchy
+                        current_dest = dst
+                        for part in parts[:-1]:
+                            if part not in current_dest:
+                                current_dest.create_group(part)
+                            current_dest = current_dest[part]
                         
-                        # Copy the item
-                        # name=full_path ensures it ends up in the correct location
-                        src.copy(item_path, dst, name=full_path)
+                        # Copy the item recursively with compression
+                        item_name = parts[-1]
+                        recursive_copy(src[item_path], current_dest, item_name, compression)
                 
         return True
     except Exception as e:

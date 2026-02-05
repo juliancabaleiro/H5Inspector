@@ -39,13 +39,15 @@ with h5py.File(name, "w") as f:
     dset_t = grp_sep.create_dataset(
         "time",
         data=t,
-        dtype="float64"
+        dtype="float64",
+        compression="gzip"
     )
 
     dset_s = grp_sep.create_dataset(
         "signal",
         data=signal,
-        dtype="float64"
+        dtype="float64",
+        compression="gzip"
     )
 
     # Atributos
@@ -68,7 +70,8 @@ with h5py.File(name, "w") as f:
     dset_m = grp_mat.create_dataset(
         "data",
         data=matrix,
-        dtype="float64"
+        dtype="float64",
+        compression="gzip"
     )
 
     dset_m.attrs["columns"] = ["time", "signal"]

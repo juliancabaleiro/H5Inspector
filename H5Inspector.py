@@ -6,6 +6,7 @@ H5Inspector
 General structure
 """
 import os
+import sys
 from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTabWidget,QFileDialog, QMessageBox, QLabel, QStatusBar
 from view_tab import ViewTab
 from edit_tab import EditTab
